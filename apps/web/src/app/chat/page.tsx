@@ -1,13 +1,401 @@
-import React from 'react';
-import ChatInterface from '@/app/chat/_components/chat-interface'; // Import the client component
+"use client";
 
-// The main page remains a Server Component, but it renders the Client Component
-// that handles the interactive chat logic.
+import React, { useReducer, useCallback, useRef, useEffect, useState, useMemo } from 'react';
+import { cn } from '@/lib/utils'; // Import the cn utility
+import ChatMessages from './_components/chat-messages'; // Renamed component
+import ChatInput from './_components/chat-input';
+import { ChevronDown, Home } from 'lucide-react'; // Icon for scroll button and Home icon
+// import { useTypingEffect } from '@/hooks/useTypingEffect'; // Remove hook import
+
+// --- Interfaces (Revert Message interface) --- 
+interface Message {
+  id: string;
+  role: 'user' | 'assistant'; 
+  content: string; // Back to just content
+  agentName?: string; 
+  isLoading?: boolean; 
+}
+
+interface ChatMessageInput {
+  role: string;
+  content: string;
+}
+
+// --- Reducer Logic (Revert changes) --- 
+
+interface ChatState {
+    messages: { [id: string]: Message }; 
+    messageOrder: string[];
+    isLoading: boolean;
+    loadingMessageId: string | null; 
+    currentAssistantMessageId: string | null; 
+}
+
+type ChatAction =
+    | { type: 'START_ASSISTANT_MESSAGE'; payload: { id: string; agentName?: string } }
+    | { type: 'APPEND_DELTA'; payload: { id: string; delta: string } } // Back to APPEND_DELTA
+    // | { type: 'UPDATE_DISPLAYED_CONTENT'; payload: { id: string; newContent: string } } // Remove this
+    | { type: 'UPDATE_AGENT_NAME'; payload: { id: string; agentName: string } }
+    | { type: 'COMPLETE_ASSISTANT_MESSAGE'; payload: { id: string } }
+    | { type: 'ADD_USER_MESSAGE'; payload: Message }
+    | { type: 'SET_ERROR'; payload: { errorContent: string } }
+    | { type: 'RESET_CHAT' }; // Add reset action type
+
+const initialState: ChatState = {
+    messages: {},
+    messageOrder: [],
+    isLoading: false,
+    loadingMessageId: null,
+    currentAssistantMessageId: null,
+};
+
+function chatReducer(state: ChatState, action: ChatAction): ChatState {
+    switch (action.type) {
+        case 'ADD_USER_MESSAGE':
+             // Revert - just add the message as is
+            return {
+                ...state,
+                isLoading: true, 
+                messages: { ...state.messages, [action.payload.id]: action.payload },
+                messageOrder: [...state.messageOrder, action.payload.id],
+            };
+
+        case 'START_ASSISTANT_MESSAGE':
+            const newMessage: Message = {
+                id: action.payload.id,
+                role: 'assistant',
+                content: '', // Start empty
+                agentName: action.payload.agentName || 'Assistant',
+                isLoading: true, 
+            };
+            return {
+                ...state,
+                currentAssistantMessageId: action.payload.id, 
+                loadingMessageId: action.payload.id, 
+                messages: { ...state.messages, [action.payload.id]: newMessage },
+                messageOrder: [...state.messageOrder, action.payload.id],
+            };
+
+        case 'APPEND_DELTA': // Renamed back
+            if (!state.messages[action.payload.id] || state.loadingMessageId !== action.payload.id) return state;
+            const msgToAppend = state.messages[action.payload.id];
+            return {
+                ...state,
+                messages: {
+                    ...state.messages,
+                    [action.payload.id]: {
+                        ...msgToAppend,
+                        content: msgToAppend.content + action.payload.delta, // Update content directly
+                    }
+                }
+            };
+        
+        // case 'UPDATE_DISPLAYED_CONTENT': // Remove this case
+        //     return state; // Or handle appropriately if needed elsewhere
+
+        case 'UPDATE_AGENT_NAME':
+             if (!state.messages[action.payload.id] || state.loadingMessageId !== action.payload.id) return state;
+             const msgToUpdateAgent = state.messages[action.payload.id];
+            return {
+                ...state,
+                messages: {
+                    ...state.messages,
+                    [action.payload.id]: {
+                        ...msgToUpdateAgent,
+                        agentName: action.payload.agentName,
+                    }
+                }
+            };
+
+        case 'COMPLETE_ASSISTANT_MESSAGE':
+            if (state.loadingMessageId !== action.payload.id) return state;
+            const completedMsg = state.messages[action.payload.id];
+            const updatedMessages = completedMsg ? { 
+                ...state.messages, 
+                [action.payload.id]: { ...completedMsg, isLoading: false } // Just set isLoading false
+            } : state.messages;
+            
+            return {
+                ...state,
+                messages: updatedMessages,
+                isLoading: false,
+                loadingMessageId: null,
+                currentAssistantMessageId: null,
+            };
+        
+        case 'SET_ERROR':
+             const errorId = `error-${Date.now()}`;
+             const errorMessage: Message = {
+                 id: errorId,
+                 role: 'assistant',
+                 content: `Error: ${action.payload.errorContent}`, // Back to content
+                 agentName: 'System Error'
+             };
+            return {
+                ...state,
+                isLoading: false,
+                loadingMessageId: null,
+                currentAssistantMessageId: null,
+                messages: { ...state.messages, [errorId]: errorMessage },
+                messageOrder: [...state.messageOrder, errorId],
+            };
+
+        case 'RESET_CHAT': // Add reset case
+            console.log("Resetting chat state...");
+            return initialState;
+
+        default:
+            return state;
+    }
+}
+
+// --- Page Component --- 
 export default function ChatPage() {
+    const [state, dispatch] = useReducer(chatReducer, initialState);
+    const { messages, messageOrder, isLoading, loadingMessageId } = state;
+    const orderedMessages = useMemo(() => 
+        messageOrder.map(id => messages[id]).filter(Boolean)
+    , [messageOrder, messages]);
+    const hasStarted = state.messageOrder.length > 0;
+
+    // Remove loadingMessage and useTypingEffect hook
+    // const loadingMessage = useMemo(() => ... );
+    // useTypingEffect(...);
+
+    // Ref for the scrollable message container
+    const scrollRef = useRef<HTMLDivElement>(null);
+    // State to track if user is scrolled up
+    const [isScrolledUp, setIsScrolledUp] = useState(false);
+
+    // Scroll to bottom effect
+    useEffect(() => {
+        // Only auto-scroll to bottom if a specific assistant message IS loading and user isn't scrolled up
+        if (scrollRef.current && !isScrolledUp && loadingMessageId) { 
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+        // Depend on message length AND the specific loading ID
+    }, [orderedMessages.length, isScrolledUp, loadingMessageId]);
+
+    // Scroll listener effect
+    useEffect(() => {
+        const mainElement = scrollRef.current;
+        console.log("Attaching scroll listener effect. mainElement found:", !!mainElement); // Log if element exists
+        if (!mainElement) {
+             console.warn("Scroll listener useEffect: mainElement ref is null!");
+            return; // Don't attach listener if element doesn't exist
+        }
+
+        const handleScroll = () => {
+            const { scrollTop, scrollHeight, clientHeight } = mainElement;
+            // Check if scrolled up more than a certain threshold (e.g., 50px)
+            const scrolledUp = scrollHeight - scrollTop - clientHeight > 50;
+            console.log(`Scroll Check: H=${scrollHeight}, Top=${scrollTop.toFixed(0)}, ClientH=${clientHeight.toFixed(0)}, ScrolledUp=${scrolledUp}`); // Log scroll values
+            setIsScrolledUp(scrolledUp);
+        };
+
+        mainElement.addEventListener('scroll', handleScroll);
+
+        // Cleanup listener
+        return () => {
+            mainElement.removeEventListener('scroll', handleScroll);
+        };
+    }, [hasStarted]); // Add hasStarted to dependency array
+
+    const scrollToBottom = () => {
+        if (scrollRef.current) {
+             scrollRef.current.scrollTo({
+                 top: scrollRef.current.scrollHeight,
+                 behavior: 'smooth'
+             });
+        }
+        setIsScrolledUp(false); // Assume user wants to stay at bottom after clicking
+    };
+
+    // Add handler for resetting chat
+    const handleReset = useCallback(() => {
+        // Could add confirmation dialog here if desired
+        dispatch({ type: 'RESET_CHAT' });
+    }, [dispatch]);
+
+    const handleSendMessage = useCallback(async (userInput: string) => {
+        if (state.isLoading) return;
+
+        const newUserMessage: Message = {
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content: userInput, // Back to content
+        };
+        dispatch({ type: 'ADD_USER_MESSAGE', payload: newUserMessage });
+
+        // Schedule scroll to top after adding user message
+        requestAnimationFrame(() => {
+            if (scrollRef.current) {
+                scrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+                // We might briefly be scrolled up, let the scroll listener handle the state
+            }
+        });
+
+        const newAssistantMsgId = `assistant-${Date.now()}-${Math.random()}`;
+        dispatch({ type: 'START_ASSISTANT_MESSAGE', payload: { id: newAssistantMsgId } });
+
+        // Prepare history - use content field
+        const currentMessagesArray = orderedMessages;
+        const historyForBackend: ChatMessageInput[] = currentMessagesArray.map(msg => ({
+            role: msg.role,
+            content: msg.content, // Use content
+        }));
+
+        const requestBody = {
+             user_message: userInput,
+             history: historyForBackend
+         };
+
+        try {
+            const response = await fetch('http://localhost:8000/chat/stream', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream',
+                },
+                body: JSON.stringify(requestBody),
+            });
+
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            if (!response.body) throw new Error("Response body is null");
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            const assistantMessageIdForThisStream = newAssistantMsgId; 
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: assistantMessageIdForThisStream } });
+                    break; 
+                }
+                buffer += decoder.decode(value, { stream: true });
+
+                let boundaryIndex;
+                while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1 || (boundaryIndex = buffer.indexOf('\r\n\r\n')) !== -1) {
+                    const messageEndIndex = boundaryIndex + (buffer.substring(boundaryIndex).startsWith('\r\n\r\n') ? 4 : 2);
+                    const messageBlock = buffer.substring(0, boundaryIndex).trim();
+                    buffer = buffer.substring(messageEndIndex);
+
+                    if (messageBlock.startsWith('data: ')) {
+                        try {
+                            const jsonData = messageBlock.substring(6).trim();
+                            if (jsonData && jsonData.toUpperCase() !== '[DONE]') {
+                                const parsedData = JSON.parse(jsonData);
+                                
+                                if (parsedData.event_type === 'RawResponsesStreamEvent' && parsedData.data?.delta) {
+                                    // Dispatch APPEND_DELTA directly
+                                    dispatch({ type: 'APPEND_DELTA', payload: { id: assistantMessageIdForThisStream, delta: parsedData.data.delta } });
+                                } else if (parsedData.event_type === 'AgentUpdatedStreamEvent' && parsedData.data?.agent_name) {
+                                    dispatch({ type: 'UPDATE_AGENT_NAME', payload: { id: assistantMessageIdForThisStream, agentName: parsedData.data.agent_name } });
+                                } else if (parsedData.event_type === 'ServerError' || parsedData.event_type === 'AgentErrorEvent') {
+                                     dispatch({ type: 'SET_ERROR', payload: { errorContent: parsedData.data?.error || 'Unknown backend error' } });
+                                 }
+                            }
+                        } catch (e) {
+                            console.error("Failed to parse SSE JSON:", e, messageBlock.substring(6));
+                        }
+                    }
+                } 
+            } 
+
+        } catch (error: any) {
+            console.error("Chat stream error:", error);
+             dispatch({ type: 'SET_ERROR', payload: { errorContent: error.message || 'Unknown fetch error' } });
+        }
+    }, [state.isLoading, state.messageOrder, state.messages, orderedMessages]); // Keep dependencies
+
+    console.log(`Rendering ChatPage: isScrolledUp = ${isScrolledUp}`); // Log state before render
+
   return (
-    <div className="h-screen bg-gray-100 dark:bg-gray-900">
-      {/* Render the client-side chat interface */}
-      <ChatInterface />
+    <div
+      className={cn(
+        // Revert: Restore background color, remove background image styles
+        "min-h-screen flex flex-col transition-all bg-white dark:bg-gray-900 relative", 
+        // "bg-[url('/logo.svg')] bg-center bg-no-repeat bg-contain", // Removed background image styles
+        hasStarted ? "justify-start" : "justify-center items-center" 
+      )}
+    >
+      {/* Remove Overlay */}
+      {/* <div className="absolute inset-0 bg-black/50 z-0"></div> */}
+
+      {/* Home Link Button */}
+      <a 
+        href="https://urmstontownjfc.co.uk" 
+        target="_blank" // Open in new tab
+        rel="noopener noreferrer" // Security best practice for target="_blank"
+        title="Urmston Town JFC Home"
+        className="fixed top-4 left-4 z-30 p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        aria-label="Urmston Town JFC Home"
+      >
+        <Home className="h-5 w-5" />
+      </a>
+
+      {/* Main content area (Revert z-index) */}
+      <main
+        ref={scrollRef} 
+        className={cn(
+          // Remove relative and z-index 
+          "w-full max-w-3xl mx-auto flex flex-col flex-1", 
+          hasStarted
+            ? "overflow-y-auto pt-4 pb-32 gap-3 scroll-smooth shrink-0" // Restore original padding if needed
+            : "items-center justify-center gap-8" 
+        )}
+      >
+        {/* Welcome Text (Revert color) */}
+        {!hasStarted && (
+          <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
+            Welcome to Urmston Town Juniors FC<br />What can I help you with today?
+          </h1>
+        )}
+
+        {/* Message list OR initial Input (Remove z-index wrapper) */}
+        {hasStarted ? (
+           <ChatMessages 
+                messages={orderedMessages} 
+                isLoading={isLoading} 
+                loadingMessageId={loadingMessageId}
+           />
+         ) : (
+           // Initial Input (Remove z-index wrapper)
+           // <div className="relative z-10 w-full max-w-3xl">
+               <ChatInput
+                 sticky={false} 
+                 onSendMessage={handleSendMessage} 
+                 onReset={handleReset}
+                 isLoading={isLoading} 
+               />
+           // </div>
+         )}
+      </main>
+
+      {/* Scroll to bottom button (Revert z-index) */}
+        {hasStarted && isScrolledUp && (
+            <button 
+                onClick={scrollToBottom}
+                className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 p-2 rounded-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 shadow-md hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
+                aria-label="Scroll to bottom"
+            >
+                <ChevronDown className="h-5 w-5 text-gray-600 dark:text-gray-300" />
+            </button>
+        )}
+
+      {/* Sticky Input area (Revert z-index wrapper) */} 
+      {hasStarted && (
+          // <div className="relative z-20">
+              <ChatInput
+                sticky={true} 
+                onSendMessage={handleSendMessage} 
+                onReset={handleReset}
+                isLoading={isLoading} 
+              />
+          // </div>
+      )}
     </div>
   );
 } 
