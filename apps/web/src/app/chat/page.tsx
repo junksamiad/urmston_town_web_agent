@@ -167,6 +167,19 @@ export default function ChatPage() {
     // State to track if user is scrolled up
     const [isScrolledUp, setIsScrolledUp] = useState(false);
 
+    const userJustSentRef = useRef(false);
+    const lastUserSend = useRef<number>(0);
+
+    // Define handleScroll outside useEffect to use with onScroll prop
+    const handleScroll = () => {
+        const mainElement = scrollRef.current;
+        if (!mainElement) return;
+        const { scrollTop, scrollHeight, clientHeight } = mainElement;
+        const scrolledUp = scrollHeight - scrollTop - clientHeight > 10; 
+        console.log(`Scroll Check: H=${scrollHeight}, Top=${scrollTop.toFixed(0)}, ClientH=${clientHeight.toFixed(0)}, ScrolledUp=${scrolledUp}`); 
+        setIsScrolledUp(scrolledUp);
+    };
+
     // Scroll to bottom effect
     useEffect(() => {
         // Only auto-scroll to bottom if a specific assistant message IS loading and user isn't scrolled up
@@ -176,30 +189,10 @@ export default function ChatPage() {
         // Depend on message length AND the specific loading ID
     }, [orderedMessages.length, isScrolledUp, loadingMessageId]);
 
-    // Scroll listener effect
+    // Scroll-to-top effect
     useEffect(() => {
-        const mainElement = scrollRef.current;
-        console.log("Attaching scroll listener effect. mainElement found:", !!mainElement); // Log if element exists
-        if (!mainElement) {
-             console.warn("Scroll listener useEffect: mainElement ref is null!");
-            return; // Don't attach listener if element doesn't exist
-        }
-
-        const handleScroll = () => {
-            const { scrollTop, scrollHeight, clientHeight } = mainElement;
-            // Check if scrolled up more than a certain threshold (e.g., 50px)
-            const scrolledUp = scrollHeight - scrollTop - clientHeight > 50;
-            console.log(`Scroll Check: H=${scrollHeight}, Top=${scrollTop.toFixed(0)}, ClientH=${clientHeight.toFixed(0)}, ScrolledUp=${scrolledUp}`); // Log scroll values
-            setIsScrolledUp(scrolledUp);
-        };
-
-        mainElement.addEventListener('scroll', handleScroll);
-
-        // Cleanup listener
-        return () => {
-            mainElement.removeEventListener('scroll', handleScroll);
-        };
-    }, [hasStarted]); // Add hasStarted to dependency array
+        // ... (scroll to top logic) ...
+    }, [messageOrder]);
 
     const scrollToBottom = () => {
         if (scrollRef.current) {
@@ -315,9 +308,8 @@ export default function ChatPage() {
   return (
     <div
       className={cn(
-        // Revert: Restore background color, remove background image styles
-        "min-h-screen flex flex-col transition-all bg-white dark:bg-gray-900 relative", 
-        // "bg-[url('/logo.svg')] bg-center bg-no-repeat bg-contain", // Removed background image styles
+        // Remove bottom padding, footer will occupy the space
+        "min-h-screen flex flex-col bg-white dark:bg-gray-900 relative", 
         hasStarted ? "justify-start" : "justify-center items-center" 
       )}
     >
@@ -336,66 +328,76 @@ export default function ChatPage() {
         <Home className="h-5 w-5" />
       </a>
 
-      {/* Main content area (Revert z-index) */}
+      {/* Main content area */}
       <main
-        ref={scrollRef} 
         className={cn(
-          // Remove relative and z-index 
           "w-full max-w-3xl mx-auto flex flex-col flex-1", 
-          hasStarted
-            ? "overflow-y-auto pt-4 pb-32 gap-3 scroll-smooth shrink-0" // Restore original padding if needed
-            : "items-center justify-center gap-8" 
+          !hasStarted && "items-center justify-center gap-12"
         )}
       >
-        {/* Welcome Text (Revert color) */}
-        {!hasStarted && (
-          <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
-            Welcome to Urmston Town Juniors FC<br />What can I help you with today?
-          </h1>
-        )}
+        {/* Inner Scroll Container */} 
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className={cn(
+            "w-full",
+            hasStarted
+              ? "flex-1 overflow-y-auto scroll-smooth pt-4 pb-32 gap-3" 
+              : "flex flex-col items-center justify-center gap-12"
+          )}
+        >
+            {/* Welcome Text */} 
+            {!hasStarted && (
+              <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
+                Welcome to Urmston Town Juniors FC<br />What can I help you with today?
+              </h1>
+            )}
 
-        {/* Message list OR initial Input (Remove z-index wrapper) */}
-        {hasStarted ? (
-           <ChatMessages 
-                messages={orderedMessages} 
-                isLoading={isLoading} 
-                loadingMessageId={loadingMessageId}
-           />
-         ) : (
-           // Initial Input (Remove z-index wrapper)
-           // <div className="relative z-10 w-full max-w-3xl">
-               <ChatInput
-                 sticky={false} 
-                 onSendMessage={handleSendMessage} 
-                 onReset={handleReset}
-                 isLoading={isLoading} 
+            {/* Message list OR initial Input */} 
+            {hasStarted ? (
+               <ChatMessages 
+                    messages={orderedMessages} 
+                    isLoading={isLoading} 
+                    loadingMessageId={loadingMessageId}
                />
-           // </div>
-         )}
+             ) : (
+                 <ChatInput
+                   sticky={false} 
+                   onSendMessage={handleSendMessage} 
+                   onReset={handleReset}
+                   isLoading={isLoading} 
+                 />
+             )}
+         </div>
       </main>
 
-      {/* Scroll to bottom button (Revert z-index) */}
-        {hasStarted && isScrolledUp && (
+      {/* Opaque Footer Block - sits behind input */}
+      {hasStarted && (
+        <div className="fixed bottom-0 left-0 right-0 h-28 bg-white dark:bg-gray-900 z-10"></div>
+      )}
+
+      {/* Scroll to bottom button - Temporarily moved to top for testing */}
+      {hasStarted && isScrolledUp && (
             <button 
                 onClick={scrollToBottom}
-                className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 p-2 rounded-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 shadow-md hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
+                className="absolute top-20 left-1/2 -translate-x-1/2 z-20 p-2 rounded-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 shadow-md hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
                 aria-label="Scroll to bottom"
             >
                 <ChevronDown className="h-5 w-5 text-gray-600 dark:text-gray-300" />
             </button>
         )}
 
-      {/* Sticky Input area (Revert z-index wrapper) */} 
+      {/* Sticky Input area (z-30) */}
       {hasStarted && (
-          // <div className="relative z-20">
+          <div className="relative z-30"> 
               <ChatInput
                 sticky={true} 
                 onSendMessage={handleSendMessage} 
                 onReset={handleReset}
                 isLoading={isLoading} 
               />
-          // </div>
-      )}
+          </div>
+       )}
     </div>
   );
 } 
