@@ -1,0 +1,12 @@
+  /* Reset styles for all elements */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    padding: 0;
+    border-width: 0;
+    border-style: solid;
+    border-color: var(--border-color); /* Use a variable or default color */
+  }
+
+  /* Set base font size and line height */
