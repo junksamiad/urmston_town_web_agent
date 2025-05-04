@@ -1,6 +1,8 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
 import { Clipboard } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Message {
     id: string;
@@ -39,7 +41,9 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, loadingM
                                     'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-gray-100'
                                 )}
                             >
-                                {msg.content}
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {msg.content}
+                                </ReactMarkdown>
                             </div>
                         </div>
                     ) : (
@@ -54,13 +58,9 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, loadingM
                                     <span className="animate-pulse text-gray-500 dark:text-gray-400">Assistant thinking...</span>
                                 ) : (
                                     <>
-                                        {/* Split content by newline and render with <br /> */}
-                                        {msg.content.split('\n').map((line, index, arr) => (
-                                            <React.Fragment key={index}>
-                                                {line}
-                                                {index < arr.length - 1 && <br />}
-                                            </React.Fragment>
-                                        ))}
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                            {msg.content}
+                                        </ReactMarkdown>
                                         {/* Pulsing cursor only shown when loading and content exists */}
                                         {loadingMessageId === msg.id && msg.content && <span className="animate-pulse animate-fade-in ml-1">▍</span>}
                                     </>

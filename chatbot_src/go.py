@@ -9,8 +9,11 @@ from typing import Literal, Optional # Keep these if needed elsewhere
 # --- Agent SDK Imports ---
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner, RunContextWrapper, function_tool 
 
+# --- Import Standardized Prompt Prefix ---
+from .prompt_prefix import format_prompt_with_prefix
+
 # --- Import Registration Components (Updated) ---
-from registration import registration_agent, RegistrationSummary, renew_registration_agent, new_registration_agent, code_verification_agent # Added code_verification_agent
+from .registration import registration_agent, RegistrationSummary, renew_registration_agent, new_registration_agent, code_verification_agent # Added code_verification_agent
 
 # --- Load Environment Variables ---
 load_dotenv()
@@ -71,13 +74,13 @@ query_classification_list = """
 # (Keep this placeholder here or move if creating payments.py)
 payments_agent = Agent(
     name="Payments Agent", 
-    instructions="You handle payment queries." # Placeholder
+    instructions=format_prompt_with_prefix("You handle payment queries and assist users with all financial aspects of club membership. Help with setting up payments, addressing payment issues, and explaining fee structures.") # Updated with prompt prefix
 )
 
 # --- Router Agent Definition (Updated Handoffs) ---
 router_agent = Agent(
     name="Router Agent",
-    instructions=f"""
+    instructions=format_prompt_with_prefix(f"""
 Urmston Town Juniors Football Club is a grassroots club based in Urmston, Manchester, UK. 
 Your role is to act as a first point of contact chatbot.
 Your objective is to analyze the user's query and classify it according to the `classification_policy` JSON structure provided below. 
@@ -90,7 +93,7 @@ Policy:
 ```
 
 If the query is ambiguous and you cannot confidently classify it based on the policy, ask clarifying questions to help determine the correct classification BEFORE taking any action.
-""",
+"""),
     # Reference the imported agents in handoffs
     handoffs=[code_verification_agent, registration_agent, payments_agent], # Added code_verification_agent
     # tools=[get_training_schedule] # Add tools here if needed

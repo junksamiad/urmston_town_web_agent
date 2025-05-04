@@ -12,10 +12,21 @@ interface ChatInputProps {
 
 const ChatInput: React.FC<ChatInputProps> = ({ onSendMessage, onReset, isLoading, sticky }) => {
     const [input, setInput] = useState('');
-    // Remove textareaRef if not used elsewhere (library handles sizing)
-    // const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // Remove the manual height adjustment useEffect
+    // Keep a ref to the textarea so we can programmatically focus it
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    // Auto-focus on mount
+    useEffect(() => {
+        textareaRef.current?.focus();
+    }, []);
+
+    // Re-focus whenever loading finishes (assistant response done)
+    useEffect(() => {
+        if (!isLoading) {
+            textareaRef.current?.focus();
+        }
+    }, [isLoading]);
 
     const handleSend = useCallback(() => {
         if (input.trim() && !isLoading) {
@@ -57,7 +68,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSendMessage, onReset, isLoading
                  {/* Row 1: Textarea */}
                  {/* Use TextareaAutosize component */}
                 <TextareaAutosize
-                    // ref={textareaRef} // Ref likely not needed anymore
+                    ref={textareaRef}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}

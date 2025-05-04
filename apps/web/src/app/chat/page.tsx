@@ -178,44 +178,34 @@ export default function ChatPage() {
         }
     }, [orderedMessages.length, loadingMessageId]);
 
-    // Intersection Observer effect for scroll position
+    // Scroll listener to compute whether we're at bottom
     useEffect(() => {
-        const observer = new IntersectionObserver(
-            ([entry]) => {
-                // Update state based on whether the sentinel is intersecting (visible)
-                setIsAtBottom(entry.isIntersecting);
-                console.log(`Intersection Observer: isAtBottom = ${entry.isIntersecting}`);
-            },
-            {
-                root: scrollRef.current, // Observe within the scrollable div
-                rootMargin: "0px",
-                threshold: 1.0, // Sentinel is fully visible
-            }
-        );
+        const el = scrollRef.current;
+        if (!hasStarted || !el) return;
 
-        const sentinel = endOfMessagesRef.current;
-        if (sentinel) {
-            observer.observe(sentinel);
-        }
-
-        // Cleanup
-        return () => {
-            if (sentinel) {
-                observer.unobserve(sentinel);
-            }
-            observer.disconnect();
+        const handleScroll = () => {
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            setIsAtBottom(atBottom);
         };
-        // Rerun if the scroll container changes (shouldn't often) or chat starts
-    }, [hasStarted]); // Depend on hasStarted to observe only when chat active
+
+        // Fire once for initial state
+        handleScroll();
+        el.addEventListener('scroll', handleScroll);
+
+        return () => {
+            el.removeEventListener('scroll', handleScroll);
+        };
+    }, [hasStarted]);
 
     // Auto-scroll after every new message
     useEffect(() => {
-        if (userJustSentRef.current || isAtBottom) {
-            scrollMessagesToBottom(false); // instant scroll
+        // Keep view pinned to bottom while assistant streaming, unless user scrolled up.
+        if (!userJustSentRef.current && isAtBottom) {
+            scrollMessagesToBottom(false);
         }
-        // Reset the flag so it only runs once after each user send
+        // reset signal
         if (userJustSentRef.current) userJustSentRef.current = false;
-    }, [messageOrder]);
+    }, [messageOrder, isAtBottom]);
 
     const scrollToBottom = () => {
         if (scrollRef.current) {
@@ -237,7 +227,7 @@ export default function ChatPage() {
         if (endOfMessagesRef.current) {
             endOfMessagesRef.current.scrollIntoView({
                 behavior: smooth ? 'smooth' : 'auto',
-                block: 'start', // align sentinel with top of viewport of scroll container
+                block: 'start',
             });
         } else if (scrollRef.current) {
             // Fallback: manual scroll

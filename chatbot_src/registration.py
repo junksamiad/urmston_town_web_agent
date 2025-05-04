@@ -4,6 +4,9 @@ from pydantic import BaseModel, Field
 from typing import Literal, Optional 
 from agents import Agent
 
+# --- Import Standardized Prompt Prefix ---
+from .prompt_prefix import format_prompt_with_prefix
+
 # --- Import Tool (NEW) ---
 from .tools import validate_registration_code
 
@@ -21,7 +24,7 @@ class RegistrationSummary(BaseModel):
 # --- Placeholder Final Registration Agents --- 
 renew_registration_agent = Agent(
     name="Renew Registration Agent",
-    instructions=(
+    instructions=format_prompt_with_prefix(
         "You have received a handoff for a player renewal. Your task is to summarize the information gathered from the conversation history. "
         "Review the entire conversation history provided. "
         "Identify the role (Parent/Guardian or Player 16+). "
@@ -33,7 +36,7 @@ renew_registration_agent = Agent(
 
 new_registration_agent = Agent(
     name="New Registration Agent",
-    instructions=(
+    instructions=format_prompt_with_prefix(
         "You have received a handoff for a new player registration. Your task is to summarize the information gathered from the conversation history. "
         "Review the entire conversation history provided. "
         "Identify the role (Parent/Guardian or Player 16+). "
@@ -72,14 +75,14 @@ You are the Registration Agent for Urmston Town Juniors FC. Your goal is to poli
 # --- Define Registration Agent (Existing) --- 
 registration_agent = Agent(
     name="Registration Agent",
-    instructions=registration_agent_instructions, # Use the UPDATED Restate & Ask instructions
+    instructions=format_prompt_with_prefix(registration_agent_instructions), # Use the UPDATED Restate & Ask instructions with prefix
     handoffs=[renew_registration_agent, new_registration_agent]
 )
 
 # --- Define Code Verification Agent (NEW) --- 
 code_verification_agent = Agent(
     name="Code Verification Agent",
-    instructions=(
+    instructions=format_prompt_with_prefix(
         "You are the first step in the registration process for Urmston Town Juniors FC. "
         "Acknowledge the user's request to register and respond dynamically to their query (e.g., 'Okay, I can help with registration,' or, 'Yes I can help you sign-on,' etc). "
         "Immediately explain the need for a code: 'Before we continue, I need the registration code provided by the team manager for the team you wish to join. Please enter the code now.' "
