@@ -158,40 +158,63 @@ export default function ChatPage() {
     , [messageOrder, messages]);
     const hasStarted = state.messageOrder.length > 0;
 
-    // Remove loadingMessage and useTypingEffect hook
-    // const loadingMessage = useMemo(() => ... );
-    // useTypingEffect(...);
-
     // Ref for the scrollable message container
     const scrollRef = useRef<HTMLDivElement>(null);
-    // State to track if user is scrolled up
-    const [isScrolledUp, setIsScrolledUp] = useState(false);
-
-    const userJustSentRef = useRef(false);
+    // Ref for the sentinel element at the end of messages
+    const endOfMessagesRef = useRef<HTMLDivElement>(null);
+    // State to track if scroll is at the bottom
+    const [isAtBottom, setIsAtBottom] = useState(true);
+    
+    const userJustSentRef = useRef(false); 
     const lastUserSend = useRef<number>(0);
 
-    // Define handleScroll outside useEffect to use with onScroll prop
-    const handleScroll = () => {
-        const mainElement = scrollRef.current;
-        if (!mainElement) return;
-        const { scrollTop, scrollHeight, clientHeight } = mainElement;
-        const scrolledUp = scrollHeight - scrollTop - clientHeight > 10; 
-        console.log(`Scroll Check: H=${scrollHeight}, Top=${scrollTop.toFixed(0)}, ClientH=${clientHeight.toFixed(0)}, ScrolledUp=${scrolledUp}`); 
-        setIsScrolledUp(scrolledUp);
-    };
-
-    // Scroll to bottom effect
+    // Scroll to bottom effect (keep as is for now, depends on loadingMessageId)
     useEffect(() => {
-        // Only auto-scroll to bottom if a specific assistant message IS loading and user isn't scrolled up
-        if (scrollRef.current && !isScrolledUp && loadingMessageId) { 
+        if (Date.now() - lastUserSend.current < 300) return;
+        // Note: This still scrolls based on loadingMessageId, which might need adjustment
+        // if we want it purely based on the IntersectionObserver state later.
+        if (scrollRef.current && loadingMessageId) { 
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
-        // Depend on message length AND the specific loading ID
-    }, [orderedMessages.length, isScrolledUp, loadingMessageId]);
+    }, [orderedMessages.length, loadingMessageId]);
 
-    // Scroll-to-top effect
+    // Intersection Observer effect for scroll position
     useEffect(() => {
-        // ... (scroll to top logic) ...
+        const observer = new IntersectionObserver(
+            ([entry]) => {
+                // Update state based on whether the sentinel is intersecting (visible)
+                setIsAtBottom(entry.isIntersecting);
+                console.log(`Intersection Observer: isAtBottom = ${entry.isIntersecting}`);
+            },
+            {
+                root: scrollRef.current, // Observe within the scrollable div
+                rootMargin: "0px",
+                threshold: 1.0, // Sentinel is fully visible
+            }
+        );
+
+        const sentinel = endOfMessagesRef.current;
+        if (sentinel) {
+            observer.observe(sentinel);
+        }
+
+        // Cleanup
+        return () => {
+            if (sentinel) {
+                observer.unobserve(sentinel);
+            }
+            observer.disconnect();
+        };
+        // Rerun if the scroll container changes (shouldn't often) or chat starts
+    }, [hasStarted]); // Depend on hasStarted to observe only when chat active
+
+    // Auto-scroll after every new message
+    useEffect(() => {
+        if (userJustSentRef.current || isAtBottom) {
+            scrollMessagesToBottom(false); // instant scroll
+        }
+        // Reset the flag so it only runs once after each user send
+        if (userJustSentRef.current) userJustSentRef.current = false;
     }, [messageOrder]);
 
     const scrollToBottom = () => {
@@ -201,7 +224,6 @@ export default function ChatPage() {
                  behavior: 'smooth'
              });
         }
-        setIsScrolledUp(false); // Assume user wants to stay at bottom after clicking
     };
 
     // Add handler for resetting chat
@@ -209,6 +231,19 @@ export default function ChatPage() {
         // Could add confirmation dialog here if desired
         dispatch({ type: 'RESET_CHAT' });
     }, [dispatch]);
+
+    // Helper to scroll the sentinel into view (guaranteed to exist when chat has started)
+    const scrollMessagesToBottom = useCallback((smooth: boolean = true) => {
+        if (endOfMessagesRef.current) {
+            endOfMessagesRef.current.scrollIntoView({
+                behavior: smooth ? 'smooth' : 'auto',
+                block: 'start', // align sentinel with top of viewport of scroll container
+            });
+        } else if (scrollRef.current) {
+            // Fallback: manual scroll
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+    }, []);
 
     const handleSendMessage = useCallback(async (userInput: string) => {
         if (state.isLoading) return;
@@ -220,12 +255,15 @@ export default function ChatPage() {
         };
         dispatch({ type: 'ADD_USER_MESSAGE', payload: newUserMessage });
 
-        // Schedule scroll to top after adding user message
+        // Flag so the next useEffect knows we triggered the send
+        userJustSentRef.current = true;
+
+        // Immediately record the time of this send
+        lastUserSend.current = Date.now();
+
+        // Schedule an auto-scroll to the bottom so the newly sent message is fully visible
         requestAnimationFrame(() => {
-            if (scrollRef.current) {
-                scrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
-                // We might briefly be scrolled up, let the scroll listener handle the state
-            }
+            scrollMessagesToBottom(true);
         });
 
         const newAssistantMsgId = `assistant-${Date.now()}-${Math.random()}`;
@@ -301,103 +339,120 @@ export default function ChatPage() {
             console.error("Chat stream error:", error);
              dispatch({ type: 'SET_ERROR', payload: { errorContent: error.message || 'Unknown fetch error' } });
         }
+
+        // After message is inside the DOM, ensure the user bubble is positioned at top of the scroll container
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                if (scrollRef.current) {
+                    const el = scrollRef.current.querySelector<HTMLDivElement>(`[data-msg-id="${newUserMessage.id}"]`);
+                    if (el) {
+                        const containerTop = scrollRef.current.getBoundingClientRect().top;
+                        const elTop = el.getBoundingClientRect().top;
+                        const delta = elTop - containerTop;
+                        scrollRef.current.scrollTop += delta;
+                    }
+                }
+            });
+        });
     }, [state.isLoading, state.messageOrder, state.messages, orderedMessages]); // Keep dependencies
 
-    console.log(`Rendering ChatPage: isScrolledUp = ${isScrolledUp}`); // Log state before render
-
-  return (
-    <div
-      className={cn(
-        // Remove bottom padding, footer will occupy the space
-        "min-h-screen flex flex-col bg-white dark:bg-gray-900 relative", 
-        hasStarted ? "justify-start" : "justify-center items-center" 
-      )}
-    >
-      {/* Remove Overlay */}
-      {/* <div className="absolute inset-0 bg-black/50 z-0"></div> */}
-
-      {/* Home Link Button */}
-      <a 
-        href="https://urmstontownjfc.co.uk" 
-        target="_blank" // Open in new tab
-        rel="noopener noreferrer" // Security best practice for target="_blank"
-        title="Urmston Town JFC Home"
-        className="fixed top-4 left-4 z-30 p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-        aria-label="Urmston Town JFC Home"
-      >
-        <Home className="h-5 w-5" />
-      </a>
-
-      {/* Main content area */}
-      <main
-        className={cn(
-          "w-full max-w-3xl mx-auto flex flex-col flex-1", 
-          !hasStarted && "items-center justify-center gap-12"
-        )}
-      >
-        {/* Inner Scroll Container */} 
+    return (
         <div
-          ref={scrollRef}
-          onScroll={handleScroll}
-          className={cn(
-            "w-full",
-            hasStarted
-              ? "flex-1 overflow-y-auto scroll-smooth pt-4 pb-32 gap-3" 
-              : "flex flex-col items-center justify-center gap-12"
-          )}
+            className={cn(
+                // Remove bottom padding, footer will occupy the space
+                "min-h-screen flex flex-col bg-white dark:bg-gray-900 relative", 
+                hasStarted ? "justify-start" : "justify-center items-center" 
+            )}
         >
-            {/* Welcome Text */} 
-            {!hasStarted && (
-              <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
-                Welcome to Urmston Town Juniors FC<br />What can I help you with today?
-              </h1>
+            {/* Remove Overlay */}
+            {/* <div className="absolute inset-0 bg-black/50 z-0"></div> */}
+
+            {/* Home Link Button */}
+            <a 
+                href="https://urmstontownjfc.co.uk" 
+                target="_blank" // Open in new tab
+                rel="noopener noreferrer" // Security best practice for target="_blank"
+                title="Urmston Town JFC Home"
+                className="fixed top-4 left-4 z-30 p-2 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                aria-label="Urmston Town JFC Home"
+            >
+                <Home className="h-5 w-5" />
+            </a>
+
+            {/* Main content area */}
+            <main
+                className={cn(
+                    "w-full max-w-3xl mx-auto flex flex-col flex-1 min-h-0", // Keep min-h-0
+                    !hasStarted && "items-center justify-center gap-12" 
+                )}
+            >
+                {/* Inner Scroll Container gets ref and scroll handler */} 
+                <div 
+                    ref={scrollRef} // Ref should be here
+                    className={cn(
+                        "w-full min-h-0", // Keep min-h-0
+                        hasStarted 
+                            ? "flex-1 overflow-y-auto scroll-smooth pt-4 pb-32 gap-3" // Keep overflow and padding here
+                            : "flex flex-col items-center justify-center gap-12" 
+                    )}
+                >
+                    {/* Welcome Text */} 
+                    {!hasStarted && (
+                        <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
+                            Welcome to Urmston Town Juniors FC<br />What can I help you with today?
+                        </h1>
+                    )}
+
+                    {/* Message list OR initial Input */} 
+                    {hasStarted ? (
+                        <>
+                            <ChatMessages 
+                                messages={orderedMessages} 
+                                isLoading={isLoading} 
+                                loadingMessageId={loadingMessageId}
+                            />
+
+                            {/* Sentinel element for Intersection Observer */} 
+                            <div ref={endOfMessagesRef} style={{ height: '1px' }} /> 
+                        </>
+                    ) : (
+                        <ChatInput
+                            sticky={false} 
+                            onSendMessage={handleSendMessage} 
+                            onReset={handleReset}
+                            isLoading={isLoading} 
+                        />
+                    )}
+                </div>
+            </main>
+
+            {/* Gradient Overlay - Positioned after main content (z-20) */}
+            {hasStarted && (
+                <div className="pointer-events-none fixed bottom-0 inset-x-0 h-28 bg-gradient-to-t from-white via-white/80 to-transparent dark:from-gray-900 dark:via-gray-900/80 dark:to-transparent z-20" /> 
             )}
 
-            {/* Message list OR initial Input */} 
-            {hasStarted ? (
-               <ChatMessages 
-                    messages={orderedMessages} 
-                    isLoading={isLoading} 
-                    loadingMessageId={loadingMessageId}
-               />
-             ) : (
-                 <ChatInput
-                   sticky={false} 
-                   onSendMessage={handleSendMessage} 
-                   onReset={handleReset}
-                   isLoading={isLoading} 
-                 />
-             )}
-         </div>
-      </main>
+            {/* Scroll to bottom button (z-30) - Conditionally render based on isAtBottom */}
+            {hasStarted && !isAtBottom && (
+                <button 
+                    onClick={scrollToBottom}
+                    className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 p-2 rounded-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 shadow-md hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
+                    aria-label="Scroll to bottom"
+                >
+                    <ChevronDown className="h-5 w-5 text-gray-600 dark:text-gray-300" />
+                </button>
+            )}
 
-      {/* Opaque Footer Block - sits behind input */}
-      {hasStarted && (
-        <div className="fixed bottom-0 left-0 right-0 h-28 bg-white dark:bg-gray-900 z-10"></div>
-      )}
-
-      {/* Scroll to bottom button - Temporarily moved to top for testing */}
-      {hasStarted && isScrolledUp && (
-            <button 
-                onClick={scrollToBottom}
-                className="absolute top-20 left-1/2 -translate-x-1/2 z-20 p-2 rounded-full bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 shadow-md hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
-                aria-label="Scroll to bottom"
-            >
-                <ChevronDown className="h-5 w-5 text-gray-600 dark:text-gray-300" />
-            </button>
-        )}
-
-      {/* Sticky Input area (z-30) */}
-      {hasStarted && (
-          <div className="relative z-30"> 
-              <ChatInput
-                sticky={true} 
-                onSendMessage={handleSendMessage} 
-                onReset={handleReset}
-                isLoading={isLoading} 
-              />
-          </div>
-       )}
-    </div>
-  );
+            {/* Sticky Input area (z-40) */}
+            {hasStarted && (
+                <div className="relative z-40"> 
+                    <ChatInput
+                        sticky={true} 
+                        onSendMessage={handleSendMessage} 
+                        onReset={handleReset}
+                        isLoading={isLoading} 
+                    />
+                </div>
+            )}
+        </div>
+    );
 } 

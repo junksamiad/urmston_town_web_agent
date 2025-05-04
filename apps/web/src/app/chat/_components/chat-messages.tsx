@@ -32,7 +32,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, loadingM
             {messages.map((msg) => (
                 <React.Fragment key={msg.id}>
                     {msg.role === 'user' ? (
-                        <div className="flex justify-end">
+                        <div className="flex justify-end" data-msg-id={msg.id}>
                             <div
                                 className={cn(
                                     "rounded-3xl p-3 prose prose-sm dark:prose-invert break-words max-w-[75%] shadow-sm",
@@ -43,7 +43,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, loadingM
                             </div>
                         </div>
                     ) : (
-                        <div className="flex flex-col items-start" key={`assist-grp-${msg.id}`}>
+                        <div className="flex flex-col items-start" data-msg-id={msg.id} key={`assist-grp-${msg.id}`}>
                             <div
                                 className={cn(
                                     "rounded-lg p-3 prose prose-sm dark:prose-invert break-words w-auto",
