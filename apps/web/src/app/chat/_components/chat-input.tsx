@@ -74,7 +74,7 @@ const ChatInput: React.FC<ChatInputProps> = ({ onSendMessage, onReset, isLoading
                     onKeyDown={handleKeyDown}
                     placeholder="Ask anything..."
                      // Remove flex-1 to prevent default vertical growth
-                    className="w-full resize-none overflow-y-auto max-h-60 rounded-lg bg-transparent border-0 px-2.5 focus:outline-none focus:ring-0 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-gray-900 dark:text-gray-100"
+                    className="w-full resize-none overflow-y-auto max-h-60 rounded-lg bg-transparent border-0 px-2.5 focus:outline-none focus:ring-0 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-gray-900 dark:text-gray-100 text-sm leading-6"
                     disabled={isLoading}
                     // Add cacheMeasurements prop for potential performance boost
                     cacheMeasurements 
