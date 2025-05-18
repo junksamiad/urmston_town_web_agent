@@ -69,11 +69,11 @@ from agents import Agent, Runner # Import SDK components
 
 # Import agents from our chatbot source package
 from chatbot_src.registration import (
-    code_verification_agent,
-    registration_agent,
+    # code_verification_agent, # REMOVED
+    # registration_agent,      # REMOVED
     renew_registration_agent,
     new_registration_agent,
-    RegistrationSummary # Import the model if needed for type checking later
+    RegistrationSummary 
 )
 # Import tools if needed directly (though agents should encapsulate them)
 # from chatbot_src.tools import validate_registration_code
@@ -138,18 +138,19 @@ Policy:
 If the query is ambiguous and you cannot confidently classify it based on the policy, ask clarifying questions to help determine the correct classification BEFORE taking any action.
 """,
     # Include ALL agents that can be handed off to OR that might be the 'last_agent'
-    handoffs=[code_verification_agent, registration_agent, payments_agent, renew_registration_agent, new_registration_agent],
+    # Handoffs updated to only include currently defined agents relevant to router
+    handoffs=[payments_agent, new_registration_agent, renew_registration_agent], 
     # tools=[get_training_schedule] # Add if/when defined
 )
 
 # Agent Registry for easy lookup by name
 AGENT_REGISTRY: Dict[str, Agent] = {
-    router_agent.name: router_agent,
-    code_verification_agent.name: code_verification_agent,
-    registration_agent.name: registration_agent,
+    router_agent.name: router_agent, 
+    # code_verification_agent.name: code_verification_agent, # REMOVED
+    # registration_agent.name: registration_agent,          # REMOVED
     payments_agent.name: payments_agent,
-    renew_registration_agent.name: renew_registration_agent,
-    new_registration_agent.name: new_registration_agent,
+    new_registration_agent.name: new_registration_agent, 
+    renew_registration_agent.name: renew_registration_agent, 
 }
 
 print("Agents imported and defined.")
@@ -365,57 +366,95 @@ async def initial_connection_stream():
         # yield json.dumps({"event_type": "keepalive"})
 
 @app.post("/chat/stream") 
-async def chat_stream_endpoint(chat_request: ChatRequest): 
+async def chat_stream_endpoint(chat_request: ChatRequest):
     """
-    Handles chat requests. 
-    If user_message is treated as a registration code, it validates it and streams back the result.
-    Otherwise, (eventually) streams back agent responses using SSE.
+    Handles chat requests.
+    If user_message is treated as a registration code, it validates it, 
+    then routes to the appropriate registration agent with extracted details.
+    Otherwise, (eventually) streams back other agent responses using SSE.
     """
 
+    # For this step, we assume the user_message IS the registration code.
     potential_code = chat_request.user_message 
-    print(f"Received potential registration code: {potential_code}")
+    print(f"[ENDPOINT] Received potential registration code: {potential_code}")
 
-    # --- REGISTRATION CODE VALIDATION LOGIC ---
     validation_response = parse_and_validate_registration_code(potential_code)
-    print(f"Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
-    
-    return EventSourceResponse(stream_code_validation_result(validation_response))
+    print(f"[ENDPOINT] Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
 
-    # --- TEMPORARY ECHO LOGIC (Now replaced by code validation logic above) ---
-    # print(f"Received user message for echo: {chat_request.user_message}")
-    # echo_event_generator = stream_echo_response(chat_request.user_message)
-    # return EventSourceResponse(echo_event_generator)
+    if validation_response.status == "valid" and validation_response.details:
+        details = validation_response.details
+        agent_to_run_selected = None
+        initial_agent_message_content = ""
 
-    # --- ORIGINAL AGENT LOGIC (Still Commented out) ---
-    # # --- NEW: Handle Registration Code if present --- 
-    # # This block would be used if chat_request.registration_code was populated by frontend
-    # if chat_request.registration_code:
-    #     print(f"Received registration code: {chat_request.registration_code}")
-    #     validation_response = parse_and_validate_registration_code(chat_request.registration_code)
-    #     print(f"Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
-    #     return EventSourceResponse(stream_code_validation_result(validation_response))
-    # # --- END NEW ---
-    
-    # # --- Determine Agent to Run --- 
+        membership_status = "new" if details.code_type == "new_registration" else "existing"
+        age_group_value = f"u{details.age_group}s"
+        team_name_value = details.team_name
+        reg_season_str = f"{str(details.season_start_year)[-2:]}{str(details.season_end_year)[-2:]}"
+
+        # Prepare a user-friendly message to send to the agent as its first input
+        initial_agent_message_content = (
+            f"Starting registration with the following context provided from the validated code:\n"
+            f"- Membership Status: {membership_status}\n"
+            f"- Team Name: {team_name_value}\n"
+            f"- Age Group: {age_group_value}\n"
+            f"- Registration Season: {reg_season_str}\n"
+            f"(Based on validated raw code: {details.raw_code})"
+        )
+
+        target_agent_name = ""
+        if details.code_type == "new_registration":
+            target_agent_name = new_registration_agent.name # Get name from the agent object
+            agent_to_run_selected = AGENT_REGISTRY.get(target_agent_name)
+        elif details.code_type == "renewal_registration":
+            target_agent_name = renew_registration_agent.name # Get name from the agent object
+            agent_to_run_selected = AGENT_REGISTRY.get(target_agent_name)
+        
+        if agent_to_run_selected:
+            print(f"[ENDPOINT] Code valid. Routing to '{agent_to_run_selected.name}'.")
+            print(f"[ENDPOINT] Initial message for agent: {initial_agent_message_content}")
+            
+            # The history for this first interaction with the selected agent is empty.
+            # The initial_agent_message_content acts as the first "user" prompt.
+            agent_input = [{
+                "role": "user", 
+                "content": initial_agent_message_content
+            }]
+            
+            event_generator = run_agent_stream(agent_to_run_selected, agent_input)
+            return EventSourceResponse(event_generator)
+        else:
+            print(f"[ENDPOINT] Error: Could not find agent named '{target_agent_name}' in AGENT_REGISTRY for code type '{details.code_type}'.")
+            error_validation_response = CodeValidationResponse(
+                status="invalid", 
+                reason=f"Internal error: No agent configured for code type '{details.code_type}' or agent '{target_agent_name}' not found.", 
+                raw_code=details.raw_code
+            )
+            return EventSourceResponse(stream_code_validation_result(error_validation_response))
+
+    else: # Code is invalid or details are missing from validation_response
+        print(f"[ENDPOINT] Code invalid or details missing. Sending validation failure to client.")
+        # Send back the validation failure result
+        return EventSourceResponse(stream_code_validation_result(validation_response))
+
+    # --- Fallback/Old Agent Logic (SHOULD NOT BE REACHED IF FIRST MESSAGE IS ALWAYS A CODE) ---
+    # This section is now effectively bypassed if the first message is always a code.
+    # If the frontend changes to send code in a separate field, this logic might be re-enabled
+    # for non-code initial messages.
+    # print("[ENDPOINT] No registration code processed, attempting default agent routing...")
     # if chat_request.last_agent_name and chat_request.last_agent_name in AGENT_REGISTRY:
     #     agent_to_run = AGENT_REGISTRY[chat_request.last_agent_name]
     #     print(f"Continuing conversation with: {agent_to_run.name}")
     # else:
     #     agent_to_run = router_agent # Default to router agent for new conversations
     #     print(f"Starting new conversation with: {agent_to_run.name}")
-
-    # # --- Prepare Agent Input --- 
     # history_dicts = [msg.model_dump() for msg in chat_request.history] if chat_request.history else []
     # agent_input = history_dicts + [{
     #     "role": "user", 
     #     "content": chat_request.user_message
     # }]
     # print(f"Agent Input ({len(agent_input)} messages): {agent_input}")
-
-    # # --- Run Agent and Stream Events --- 
     # event_generator = run_agent_stream(agent_to_run, agent_input)
     # return EventSourceResponse(event_generator)
-    # --- END OF ORIGINAL AGENT LOGIC ---
 
 # Main execution block (for running with uvicorn)
 if __name__ == "__main__":
