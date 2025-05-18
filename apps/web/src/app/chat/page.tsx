@@ -34,7 +34,7 @@ interface ChatState {
 type ChatAction =
     | { type: 'START_ASSISTANT_MESSAGE'; payload: { id: string; agentName?: string } }
     | { type: 'APPEND_DELTA'; payload: { id: string; delta: string } } // Back to APPEND_DELTA
-    // | { type: 'UPDATE_DISPLAYED_CONTENT'; payload: { id: string; newContent: string } } // Remove this
+    | { type: 'UPDATE_ASSISTANT_JSON_CONTENT'; payload: { id: string; agentResponseText: string; overallTaskComplete: boolean; passOffToAgent: string | null } }
     | { type: 'UPDATE_AGENT_NAME'; payload: { id: string; agentName: string } }
     | { type: 'COMPLETE_ASSISTANT_MESSAGE'; payload: { id: string } }
     | { type: 'ADD_USER_MESSAGE'; payload: Message }
@@ -90,8 +90,19 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
                 }
             };
         
-        // case 'UPDATE_DISPLAYED_CONTENT': // Remove this case
-        //     return state; // Or handle appropriately if needed elsewhere
+        case 'UPDATE_ASSISTANT_JSON_CONTENT':
+            if (!state.messages[action.payload.id]) return state;
+            const msgToUpdate = state.messages[action.payload.id];
+            return {
+                ...state,
+                messages: {
+                    ...state.messages,
+                    [action.payload.id]: {
+                        ...msgToUpdate,
+                        content: action.payload.agentResponseText,
+                    }
+                },
+            };
 
         case 'UPDATE_AGENT_NAME':
              if (!state.messages[action.payload.id] || state.loadingMessageId !== action.payload.id) return state;
@@ -108,7 +119,7 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
             };
 
         case 'COMPLETE_ASSISTANT_MESSAGE':
-            if (state.loadingMessageId !== action.payload.id) return state;
+            if (state.loadingMessageId !== action.payload.id && state.currentAssistantMessageId !== action.payload.id) return state;
             const completedMsg = state.messages[action.payload.id];
             const updatedMessages = completedMsg ? { 
                 ...state.messages, 
@@ -152,11 +163,13 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
 // --- Page Component --- 
 export default function ChatPage() {
     const [state, dispatch] = useReducer(chatReducer, initialState);
-    const { messages, messageOrder, isLoading, loadingMessageId } = state;
+    const { messages, messageOrder, isLoading, loadingMessageId, currentAssistantMessageId } = state;
     const orderedMessages = useMemo(() => 
         messageOrder.map(id => messages[id]).filter(Boolean)
     , [messageOrder, messages]);
     const hasStarted = state.messageOrder.length > 0;
+
+    const currentAssistantJsonBuffer = useRef<string>("");
 
     // Ref for the scrollable message container
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -176,7 +189,6 @@ export default function ChatPage() {
                 block: 'start',
             });
         } else if (scrollRef.current) {
-            // Fallback: manual scroll
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
     }, []);
@@ -235,51 +247,60 @@ export default function ChatPage() {
         dispatch({ type: 'RESET_CHAT' });
     }, [dispatch]);
 
+    // Main useEffect for handling SSE (Still consider if this is needed if handleSendMessage processes the stream)
+    useEffect(() => {
+        if (!hasStarted) {
+            // console.log("Chat not started, SSE connection deferred."); // Removed this log
+            return;
+        }
+        // console.log("SSE useEffect triggered. Potential EventSource connection.");
+        // const eventSource = new EventSource('http://localhost:8000/chat/stream');
+        // eventSource.onopen = () => console.log("SSE connection opened via useEffect.");
+        // eventSource.onmessage = (event) => { /* ... SSE processing ... */ };
+        // eventSource.onerror = (err) => { /* ... */ };
+        // return () => eventSource.close();
+        // For now, this useEffect will be a NO-OP as handleSendMessage is processing the stream.
+        // If you decide to switch to EventSource as primary, uncomment and adapt the above.
+        return () => {}; // No-op cleanup
+
+    }, [hasStarted, currentAssistantMessageId]); // Dependencies kept for potential future use with EventSource
+
     const handleSendMessage = useCallback(async (userInput: string) => {
-        if (state.isLoading) return;
+        if (isLoading) return;
 
         const newUserMessage: Message = {
             id: `user-${Date.now()}`,
             role: 'user',
-            content: userInput, // Back to content
+            content: userInput,
         };
         dispatch({ type: 'ADD_USER_MESSAGE', payload: newUserMessage });
-
-        // Flag so the next useEffect knows we triggered the send
         userJustSentRef.current = true;
-
-        // Immediately record the time of this send
         lastUserSend.current = Date.now();
+        requestAnimationFrame(() => { scrollMessagesToBottom(true); });
 
-        // Schedule an auto-scroll to the bottom so the newly sent message is fully visible
-        requestAnimationFrame(() => {
-            scrollMessagesToBottom(true);
-        });
+        // Removed unused newAssistantMsgId
 
-        const newAssistantMsgId = `assistant-${Date.now()}-${Math.random()}`;
-        dispatch({ type: 'START_ASSISTANT_MESSAGE', payload: { id: newAssistantMsgId } });
-
-        // Prepare history - use content field
-        const currentMessagesArray = orderedMessages;
-        const historyForBackend: ChatMessageInput[] = currentMessagesArray.map(msg => ({
+        const historyForBackend: ChatMessageInput[] = orderedMessages.map(msg => ({
             role: msg.role,
-            content: msg.content, // Use content
+            content: msg.content,
         }));
 
-        const requestBody = {
+        const requestBodyData = {
              user_message: userInput,
-             history: historyForBackend
+             history: historyForBackend,
+             last_agent_name: orderedMessages.length > 0 && orderedMessages[orderedMessages.length-1].role === 'assistant' ? orderedMessages[orderedMessages.length-1].agentName : null,
+             session_id: localStorage.getItem('session_id') || undefined,
          };
 
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'; // Fallback for local dev
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
             const response = await fetch(`${apiUrl}/chat/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Accept': 'text/event-stream',
                 },
-                body: JSON.stringify(requestBody),
+                body: JSON.stringify(requestBodyData),
             });
 
             if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -287,92 +308,131 @@ export default function ChatPage() {
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let buffer = '';
-            const assistantMessageIdForThisStream = newAssistantMsgId; 
+            let fetchBuffer = '';
+            let activeMessageId = ""; 
 
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) {
-                    dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: assistantMessageIdForThisStream } });
+                    if(activeMessageId) {
+                        dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: activeMessageId } });
+                    }
                     break; 
                 }
-                buffer += decoder.decode(value, { stream: true });
+                fetchBuffer += decoder.decode(value, { stream: true });
 
-                let boundaryIndex;
-                while ((boundaryIndex = buffer.indexOf('\n\n')) !== -1 || (boundaryIndex = buffer.indexOf('\r\n\r\n')) !== -1) {
-                    const messageEndIndex = boundaryIndex + (buffer.substring(boundaryIndex).startsWith('\r\n\r\n') ? 4 : 2);
-                    const messageBlock = buffer.substring(0, boundaryIndex).trim();
-                    buffer = buffer.substring(messageEndIndex);
+                let boundaryIdx;
+                while ((boundaryIdx = fetchBuffer.indexOf('\n\n')) !== -1 || (boundaryIdx = fetchBuffer.indexOf('\r\n\r\n')) !== -1) {
+                    const messageEndIdx = boundaryIdx + (fetchBuffer.substring(boundaryIdx).startsWith('\r\n\r\n') ? 4 : 2);
+                    const rawEventData = fetchBuffer.substring(0, boundaryIdx).trim();
+                    fetchBuffer = fetchBuffer.substring(messageEndIdx);
 
-                    if (messageBlock.startsWith('data: ')) {
-                        try {
-                            const jsonData = messageBlock.substring(6).trim();
-                            if (jsonData && jsonData.toUpperCase() !== '[DONE]') {
-                                const parsedData = JSON.parse(jsonData);
-                                
-                                if (parsedData.event_type === 'code_validation_result') {
-                                    console.log("Received code_validation_result:", parsedData.data);
-                                    
-                                    const validationMsgId = `validation-${Date.now()}`;
-                                    dispatch({ 
-                                        type: 'START_ASSISTANT_MESSAGE', 
-                                        payload: { id: validationMsgId, agentName: "Code Validator" } 
-                                    });
-                            
-                                    let validationContent = `Code: ${parsedData.data.raw_code} - Status: ${parsedData.data.status}`;
-                                    if (parsedData.data.reason) {
-                                        validationContent += `\nReason: ${parsedData.data.reason}`;
+                    if (rawEventData.startsWith('data: ')) {
+                        const jsonDataString = rawEventData.substring(5).trim();
+                        console.log("Attempting to parse JSON from SSE data line:", jsonDataString);
+                        if (jsonDataString && jsonDataString.toUpperCase() !== '[DONE]') {
+                            try {
+                                const parsedEvent = JSON.parse(jsonDataString);
+                                if (parsedEvent.event_type === 'START_ASSISTANT_MESSAGE') {
+                                    activeMessageId = parsedEvent.data.id;
+                                    currentAssistantJsonBuffer.current = ""; 
+                                    dispatch({ type: 'START_ASSISTANT_MESSAGE', payload: { id: parsedEvent.data.id, agentName: parsedEvent.data.agent_name || 'Assistant' } });
+                                } else if (parsedEvent.event_type === 'RawResponsesStreamEvent' && parsedEvent.data?.delta) {
+                                    if (activeMessageId) {
+                                        dispatch({ type: 'APPEND_DELTA', payload: { id: activeMessageId, delta: parsedEvent.data.delta } });
+                                        
+                                        currentAssistantJsonBuffer.current += parsedEvent.data.delta;
                                     }
-                                    if (parsedData.data.details) {
-                                        validationContent += `\nDetails: ${JSON.stringify(parsedData.data.details, null, 2)}`;
+                                } else if (parsedEvent.event_type === 'AgentUpdatedStreamEvent' && parsedEvent.data?.agent_name) {
+                                    if (activeMessageId) {
+                                        dispatch({ type: 'UPDATE_AGENT_NAME', payload: { id: activeMessageId, agentName: parsedEvent.data.agent_name } });
                                     }
-                                    // Ensure newlines are rendered in HTML if this content goes into a <pre> or similar
-                                    // For now, \n should work if the chat message component handles it (e.g., via CSS white-space: pre-wrap)
-                                    dispatch({ 
-                                        type: 'APPEND_DELTA', 
-                                        payload: { id: validationMsgId, delta: validationContent }
-                                    });
-                            
-                                    dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: validationMsgId } });
+                                } else if (parsedEvent.event_type === 'COMPLETE_ASSISTANT_MESSAGE') {
+                                    if (activeMessageId && activeMessageId === parsedEvent.data.id) { 
+                                        let finalContent = currentAssistantJsonBuffer.current;
+                                        try {
+                                            const structuredResp = JSON.parse(currentAssistantJsonBuffer.current);
+                                            if (structuredResp.agent_response_text !== undefined) {
+                                                finalContent = structuredResp.agent_response_text;
+                                                dispatch({ 
+                                                    type: 'UPDATE_ASSISTANT_JSON_CONTENT', 
+                                                    payload: { 
+                                                        id: activeMessageId, 
+                                                        agentResponseText: finalContent,
+                                                        overallTaskComplete: structuredResp.overall_task_complete || false,
+                                                        passOffToAgent: structuredResp.pass_off_to_agent || null
+                                                    }
+                                                });
+                                            } else {
+                                                console.warn("COMPLETE_ASSISTANT_MESSAGE: Parsed JSON, but no agent_response_text. Raw deltas remain.");
+                                            }
+                                        } catch (parseError) { 
+                                            console.warn("Final JSON parse failed on complete in fetch stream. Content remains raw deltas. Error:", parseError);
+                                        }
+                                        
+                                        dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: parsedEvent.data.id } });
+                                        currentAssistantJsonBuffer.current = "";
+                                        activeMessageId = ""; 
+                                    }
+                                } else if (parsedEvent.event_type === 'code_validation_result') {
+                                    console.log("Received code_validation_result:", parsedEvent.data); 
 
-                                } else if (parsedData.event_type === 'RawResponsesStreamEvent' && parsedData.data?.delta) {
-                                    // Dispatch APPEND_DELTA directly
-                                    dispatch({ type: 'APPEND_DELTA', payload: { id: assistantMessageIdForThisStream, delta: parsedData.data.delta } });
-                                } else if (parsedData.event_type === 'AgentUpdatedStreamEvent' && parsedData.data?.agent_name) {
-                                    dispatch({ type: 'UPDATE_AGENT_NAME', payload: { id: assistantMessageIdForThisStream, agentName: parsedData.data.agent_name } });
-                                } else if (parsedData.event_type === 'ServerError' || parsedData.event_type === 'AgentErrorEvent') {
-                                     dispatch({ type: 'SET_ERROR', payload: { errorContent: parsedData.data?.error || 'Unknown backend error' } });
+                                    if (activeMessageId) { 
+                                        let valText = "Code validation result received."; // Default text
+                                        if (parsedEvent.data?.status === 'invalid' && parsedEvent.data?.display_message) {
+                                            valText = parsedEvent.data.display_message;
+                                        } else if (parsedEvent.data?.status === 'valid') {
+                                            // This path should no longer be hit if backend suppresses valid code messages
+                                            // but keeping it as a fallback or for future use if that changes.
+                                            valText = `Code: ${parsedEvent.data.raw_code} - Status: ${parsedEvent.data.status}.`;
+                                            if (parsedEvent.data.details) {
+                                                valText += ` Type: ${parsedEvent.data.details.code_type}, Team: ${parsedEvent.data.details.team_name}, Age: u${parsedEvent.data.details.age_group}, Season: ${parsedEvent.data.details.season_start_year}-${parsedEvent.data.details.season_end_year}.`;
+                                            }
+                                        } else if (parsedEvent.data?.status === 'invalid' && parsedEvent.data?.reason) {
+                                            // Fallback if display_message is not there but reason is
+                                            valText = `Code: ${parsedEvent.data.raw_code} - Status: invalid. Reason: ${parsedEvent.data.reason}.`;
+                                        }
+
+                                        console.log("Dispatching UPDATE_ASSISTANT_JSON_CONTENT for validation using activeMessageId", { activeMessageId, valText }); 
+                                        dispatch({ 
+                                            type: 'UPDATE_ASSISTANT_JSON_CONTENT', 
+                                            payload: { 
+                                                id: activeMessageId, // USE THE CURRENT activeMessageId
+                                                agentResponseText: valText, 
+                                                overallTaskComplete: true, // Assuming validation is a 'complete' task in itself
+                                                passOffToAgent: null 
+                                            } 
+                                        });
+                                        // The COMPLETE_ASSISTANT_MESSAGE for this validation sequence is sent separately by the backend
+                                        // and will be handled by the 'COMPLETE_ASSISTANT_MESSAGE' event case using its own ID.
+                                    } else {
+                                        console.warn("code_validation_result received but no activeMessageId was set. This indicates the preceding START_ASSISTANT_MESSAGE for validation was missed or cleared prematurely.");
+                                    }
+                                } else if (parsedEvent.event_type === 'ServerError' || parsedEvent.event_type === 'AgentErrorEvent') {
+                                     dispatch({ type: 'SET_ERROR', payload: { errorContent: parsedEvent.data?.error || 'Unknown backend error' } });
+                                     if(activeMessageId) dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: activeMessageId } });
+                                     break; 
                                  }
+                            } catch (jsonParseError) {
+                                console.error(
+                                    "Failed to parse SSE JSON from fetch stream:", 
+                                    jsonParseError, 
+                                    "\nOriginal rawEventData line was:", rawEventData, 
+                                    "\nString attempted to parse (jsonDataString) was:", jsonDataString
+                                );
                             }
-                        } catch (e) {
-                            console.error("Failed to parse SSE JSON:", e, messageBlock.substring(6));
                         }
                     }
                 } 
             } 
-
-        } catch (error: unknown) {
-            console.error("Chat stream error:", error);
-            const errorMessage = error instanceof Error ? error.message : 'Unknown fetch error';
-             dispatch({ type: 'SET_ERROR', payload: { errorContent: errorMessage } });
+        } catch (fetchError: unknown) {
+            console.error("Chat stream fetch error:", fetchError);
+            const errMsg = fetchError instanceof Error ? fetchError.message : 'Unknown fetch error';
+             dispatch({ type: 'SET_ERROR', payload: { errorContent: errMsg } });
         }
+    }, [isLoading, orderedMessages, dispatch, scrollMessagesToBottom]); // Added scrollMessagesToBottom
 
-        // After message is inside the DOM, ensure the user bubble is positioned at top of the scroll container
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                if (scrollRef.current) {
-                    const el = scrollRef.current.querySelector<HTMLDivElement>(`[data-msg-id="${newUserMessage.id}"]`);
-                    if (el) {
-                        const containerTop = scrollRef.current.getBoundingClientRect().top;
-                        const elTop = el.getBoundingClientRect().top;
-                        const delta = elTop - containerTop;
-                        scrollRef.current.scrollTop += delta;
-                    }
-                }
-            });
-        });
-    }, [state.isLoading, state.messageOrder, state.messages, orderedMessages, scrollMessagesToBottom]);
-
+    console.log("ChatPage render state:", { messages, messageOrder, isLoading, currentAssistantMessageId, hasStarted }); // Added log
     return (
         <div
             className={cn(

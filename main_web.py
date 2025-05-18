@@ -12,6 +12,7 @@ import json # To send JSON in SSE
 from pydantic import BaseModel, Field, validator # Added BaseModel, Field
 from typing import List, Optional, Dict, Any, Literal # Added List, Optional, Dict, Any, Literal
 from fastapi.middleware.cors import CORSMiddleware # <-- Import CORS Middleware
+import uuid # Add for generating unique IDs
 
 # Import specific event types for streaming
 from agents.stream_events import (
@@ -230,88 +231,89 @@ def parse_and_validate_registration_code(code: str) -> CodeValidationResponse:
     )
     return CodeValidationResponse(status="valid", details=details, raw_code=raw_code)
 
-# NEW: Streaming generator for code validation response
-async def stream_code_validation_result(validation_response: CodeValidationResponse):
-    """Yields a single JSON event for code validation."""
-    yield json.dumps({"event_type": "code_validation_result", "data": validation_response.model_dump()})
-    # To keep SSE connection alive briefly if client expects it before closing or for more events
-    # For this specific case, one event might be enough, and client can disconnect.
-    # await asyncio.sleep(1) # Optional: keep alive for a second
-
 # --- End Agent Imports and Definitions ---
 
 # --- Streaming Logic ---
 
 async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]]):
     """Runs the agent using run_streamed and yields JSON serializable events."""
+    assistant_message_id = f"asst_{uuid.uuid4()}" # Generate a unique ID for this agent's response stream
+    agent_name_to_yield = agent_to_run.name # Get agent name
+
     try:
-        print(f"Running agent {agent_to_run.name} with streaming...")
+        # 1. Yield START_ASSISTANT_MESSAGE as plain JSON
+        start_event_data = {
+            "event_type": "START_ASSISTANT_MESSAGE",
+            "data": {"id": assistant_message_id, "agent_name": agent_name_to_yield},
+        }
+        print(f"DEBUG: run_agent_stream yielding START_ASSISTANT_MESSAGE: {json.dumps(start_event_data)}")
+        yield json.dumps(start_event_data) # Yield plain JSON
+
+        print(f"Running agent {agent_name_to_yield} with streaming...")
+        # Corrected agent streaming call
         result_stream_obj = Runner.run_streamed(agent_to_run, agent_input)
-        last_yielded_agent_name = None # Keep track of the last agent name yielded
-
         async for event in result_stream_obj.stream_events():
+            event_type = event.__class__.__name__
             event_data = None
-            event_type = type(event).__name__ # Get the class name as event type string
-
-            # Extract relevant data based on event type
             if isinstance(event, RawResponsesStreamEvent):
-                # Check the inner event type for text delta
-                if hasattr(event.data, 'type') and event.data.type == "response.output_text.delta":
-                    if hasattr(event.data, 'delta') and event.data.delta:
-                        event_data = {"delta": event.data.delta}
-                        # We don't yield agent name here, assuming it was set by RunItem/AgentUpdated
-                    else:
-                        # Handle cases where type is delta but no delta content (should be rare)
-                        event_data = None # Or maybe log a warning
-                else:
-                     # Other raw response types, ignore for now or handle specifically if needed
-                     event_data = None 
+                if hasattr(event, 'data') and hasattr(event.data, 'delta') and event.data.delta is not None:
+                    event_data = {"delta": event.data.delta}
+                    print(f"BACKEND RawResponsesStreamEvent DELTA: -->{event.data.delta}<--")
+                # else:
+                #     # Log other types of RawResponsesStreamEvent if needed for debugging
+                #     # For now, we only care about deltas for direct streaming to UI
+                #     response_type = event.raw_response.type if hasattr(event.raw_response, 'type') else "N/A"
+                #     # print(f"BACKEND RawResponsesStreamEvent: Non-delta type or missing type attribute: {response_type}")
+                #     pass # Don't yield non-delta RawResponsesStreamEvents for now
+
             elif isinstance(event, RunItemStreamEvent):
-                # Indicates an agent or tool run item was created (message, tool call, handoff)
-                # We previously tried to get agent_name here, but it caused warnings.
-                # AgentUpdatedStreamEvent seems to handle agent context changes reliably.
-                # For now, we won't yield anything specific for RunItemStreamEvent unless needed later.
-                # We could potentially yield event.name and event.item.type for frontend debugging/state?
-                print(f"RunItemStreamEvent received: name={event.name}, item_type={type(event.item).__name__}")
-                event_data = None # Don't send this event to frontend for now
-            elif isinstance(event, AgentUpdatedStreamEvent): # Added specific handler
-                # Signals which agent is now controlling the flow
-                agent_name = event.new_agent.name # Get name from the Agent object
-                event_data = {"agent_name": agent_name} 
-                last_yielded_agent_name = agent_name
-            elif isinstance(event, StreamEvent):
-                 # Generic handler for other StreamEvent subtypes (Handoff, ToolCall, ToolOutput, FinalOutput, AgentError)
-                 # Try to dump if possible, otherwise just report the type
-                 try:
-                     # Attempt model_dump for events that support it (like Handoff, Tool events)
-                     event_data = event.model_dump() 
-                 except AttributeError:
-                     # Handle FinalOutputEvent specifically within this block
-                     if hasattr(event, 'final_output'):
-                         output = event.final_output
-                         if isinstance(output, BaseModel):
-                             event_data = {"final_output": output.model_dump()}
-                         else:
-                             event_data = {"final_output": str(output)}
-                     # Handle AgentErrorEvent specifically
-                     elif hasattr(event, 'error'): 
-                         print(f"Agent Error Event: {event.error}")
-                         event_data = {"error": str(event.error)}
-                     else:
-                         # Fallback for unknown StreamEvent subtypes without model_dump
-                         print(f"Unhandled StreamEvent subtype: {event_type}")
-                         event_data = {"info": f"Unhandled event type: {event_type}"} 
+                print(f"BACKEND RunItemStreamEvent received: name={event.name}, item_type={type(event.item).__name__}")
+                # We are not sending this to frontend currently, so event_data remains None
+            elif isinstance(event, AgentUpdatedStreamEvent):
+                # Corrected way to access the new agent's name
+                if hasattr(event, 'new_agent') and hasattr(event.new_agent, 'name'):
+                    event_data = {"agent_name": event.new_agent.name}
+                    print(f"BACKEND AgentUpdatedStreamEvent: New agent is {event.new_agent.name}")
+                else:
+                    print(f"BACKEND AgentUpdatedStreamEvent: Received event but could not find new_agent.name. Event: {event}")
+            elif hasattr(event, 'final_output'): # Generic check for final output events
+                print(f"BACKEND FinalOutput-like event ({event_type}) detected.")
+                output = event.final_output
+                if isinstance(output, BaseModel):
+                    event_data = {"final_output": output.model_dump()}
+                else:
+                    event_data = {"final_output": str(output)}
+            elif hasattr(event, 'error'): # Generic check for error events
+                print(f"BACKEND Error-like event ({event_type}) detected: {event.error}")
+                event_data = {"error": str(event.error)}
+            # Add more specific `isinstance` checks for other StreamEvent types if needed
+            # e.g., ToolCallStreamEvent, ToolOutputEvent, HandoffEvent
 
             if event_data is not None:
-                # Yield the event as JSON
-                yield json.dumps({"event_type": event_type, "data": event_data})
+                json_to_yield = json.dumps({"event_type": event_type, "data": event_data})
+                print(f"BACKEND YIELDING JSON: {json_to_yield}") 
+                yield json_to_yield # Yield plain JSON
+            # else:
+            #     # print(f"BACKEND Event Type {event_type} did not produce yieldable event_data (or was handled by specific log, e.g. RunItemStreamEvent).")
+            #     pass
         
-        print(f"Agent {agent_to_run.name} streaming finished.")
+        # 2. CRITICAL: Yield COMPLETE_ASSISTANT_MESSAGE as plain JSON
+        complete_event_data = {
+            "event_type": "COMPLETE_ASSISTANT_MESSAGE",
+            "data": {"id": assistant_message_id},
+        }
+        print(f"DEBUG: run_agent_stream yielding COMPLETE_ASSISTANT_MESSAGE: {json.dumps(complete_event_data)}")
+        yield json.dumps(complete_event_data) # Yield plain JSON
 
     except Exception as e:
-        print(f"Error during agent streaming: {e}")
-        # Yield an error event to the frontend
-        yield json.dumps({"event_type": "ServerError", "data": {"error": str(e)}})
+        print(f"Error in run_agent_stream for {agent_name_to_yield}: {e}")
+        error_event = {
+            "event_type": "AgentErrorEvent",  # Consistent error event type
+            "data": {"error": str(e), "agent_name": agent_name_to_yield}
+        }
+        yield json.dumps(error_event) # Yield plain JSON
+    finally:
+        print(f"Agent {agent_name_to_yield} streaming finished.")
 
 # NEW: Simple echo stream generator
 async def stream_echo_response(user_message: str):
@@ -374,87 +376,104 @@ async def chat_stream_endpoint(chat_request: ChatRequest):
     Otherwise, (eventually) streams back other agent responses using SSE.
     """
 
-    # For this step, we assume the user_message IS the registration code.
     potential_code = chat_request.user_message 
     print(f"[ENDPOINT] Received potential registration code: {potential_code}")
 
-    validation_response = parse_and_validate_registration_code(potential_code)
-    print(f"[ENDPOINT] Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
-
-    if validation_response.status == "valid" and validation_response.details:
-        details = validation_response.details
-        agent_to_run_selected = None
-        initial_agent_message_content = ""
-
-        membership_status = "new" if details.code_type == "new_registration" else "existing"
-        age_group_value = f"u{details.age_group}s"
-        team_name_value = details.team_name
-        reg_season_str = f"{str(details.season_start_year)[-2:]}{str(details.season_end_year)[-2:]}"
-
-        # Prepare a user-friendly message to send to the agent as its first input
-        initial_agent_message_content = (
-            f"Starting registration with the following context provided from the validated code:\n"
-            f"- Membership Status: {membership_status}\n"
-            f"- Team Name: {team_name_value}\n"
-            f"- Age Group: {age_group_value}\n"
-            f"- Registration Season: {reg_season_str}\n"
-            f"(Based on validated raw code: {details.raw_code})"
-        )
-
-        target_agent_name = ""
-        if details.code_type == "new_registration":
-            target_agent_name = new_registration_agent.name # Get name from the agent object
-            agent_to_run_selected = AGENT_REGISTRY.get(target_agent_name)
-        elif details.code_type == "renewal_registration":
-            target_agent_name = renew_registration_agent.name # Get name from the agent object
-            agent_to_run_selected = AGENT_REGISTRY.get(target_agent_name)
+    async def event_generator():
+        validation_message_id = f"val_{uuid.uuid4()}" # Unique ID for the validation message sequence
         
-        if agent_to_run_selected:
-            print(f"[ENDPOINT] Code valid. Routing to '{agent_to_run_selected.name}'.")
-            print(f"[ENDPOINT] Initial message for agent: {initial_agent_message_content}")
-            
-            # The history for this first interaction with the selected agent is empty.
-            # The initial_agent_message_content acts as the first "user" prompt.
-            agent_input = [{
-                "role": "user", 
-                "content": initial_agent_message_content
-            }]
-            
-            event_generator = run_agent_stream(agent_to_run_selected, agent_input)
-            return EventSourceResponse(event_generator)
-        else:
-            print(f"[ENDPOINT] Error: Could not find agent named '{target_agent_name}' in AGENT_REGISTRY for code type '{details.code_type}'.")
-            error_validation_response = CodeValidationResponse(
-                status="invalid", 
-                reason=f"Internal error: No agent configured for code type '{details.code_type}' or agent '{target_agent_name}' not found.", 
-                raw_code=details.raw_code
-            )
-            return EventSourceResponse(stream_code_validation_result(error_validation_response))
+        try:
+            # Attempt to parse and validate the code
+            validation_response = parse_and_validate_registration_code(potential_code)
+            print(f"[ENDPOINT] Validation result: {validation_response.status}, Reason: {validation_response.reason or 'N/A'}")
 
-    else: # Code is invalid or details are missing from validation_response
-        print(f"[ENDPOINT] Code invalid or details missing. Sending validation failure to client.")
-        # Send back the validation failure result
-        return EventSourceResponse(stream_code_validation_result(validation_response))
+            if validation_response.status == "invalid":
+                # Only send validation events if the code is invalid
+                event_to_yield = {
+                    "event_type": "START_ASSISTANT_MESSAGE",
+                    "data": {"id": validation_message_id, "agent_name": "Validation Service"},
+                }
+                print(f"DEBUG: chat_stream_endpoint yielding START_ASSISTANT_MESSAGE for invalid validation: {json.dumps(event_to_yield)}")
+                yield json.dumps(event_to_yield)
 
-    # --- Fallback/Old Agent Logic (SHOULD NOT BE REACHED IF FIRST MESSAGE IS ALWAYS A CODE) ---
-    # This section is now effectively bypassed if the first message is always a code.
-    # If the frontend changes to send code in a separate field, this logic might be re-enabled
-    # for non-code initial messages.
-    # print("[ENDPOINT] No registration code processed, attempting default agent routing...")
-    # if chat_request.last_agent_name and chat_request.last_agent_name in AGENT_REGISTRY:
-    #     agent_to_run = AGENT_REGISTRY[chat_request.last_agent_name]
-    #     print(f"Continuing conversation with: {agent_to_run.name}")
-    # else:
-    #     agent_to_run = router_agent # Default to router agent for new conversations
-    #     print(f"Starting new conversation with: {agent_to_run.name}")
-    # history_dicts = [msg.model_dump() for msg in chat_request.history] if chat_request.history else []
-    # agent_input = history_dicts + [{
-    #     "role": "user", 
-    #     "content": chat_request.user_message
-    # }]
-    # print(f"Agent Input ({len(agent_input)} messages): {agent_input}")
-    # event_generator = run_agent_stream(agent_to_run, agent_input)
-    # return EventSourceResponse(event_generator)
+                validation_data_with_id = validation_response.model_dump(exclude_none=True)
+                validation_data_with_id["id"] = validation_message_id
+                # Replace detailed validation data with a user-friendly message for invalid codes
+                user_friendly_invalid_message = "It seems you have provided an invalid code. Please check again or confirm with your manager that the code is correct."
+                if validation_response.reason: # Optionally append the specific reason if it exists and is simple
+                    # We might want to be careful not to expose too much internal detail in the reason
+                    # For now, let's keep it generic as requested.
+                    pass # user_friendly_invalid_message += f" (Details: {validation_response.reason})"
+
+                event_to_yield = {
+                    "event_type": "code_validation_result",
+                    "data": {
+                        "id": validation_message_id, 
+                        "status": "invalid", 
+                        "display_message": user_friendly_invalid_message,
+                        "raw_code": validation_response.raw_code # Still useful for context
+                    }
+                }
+                print(f"DEBUG: chat_stream_endpoint yielding code_validation_result event for invalid code: {json.dumps(event_to_yield)}")
+                yield json.dumps(event_to_yield)
+                
+                event_to_yield = {
+                    "event_type": "COMPLETE_ASSISTANT_MESSAGE",
+                    "data": {"id": validation_message_id},
+                }
+                print(f"DEBUG: chat_stream_endpoint yielding COMPLETE_ASSISTANT_MESSAGE for invalid validation: {json.dumps(event_to_yield)}")
+                yield json.dumps(event_to_yield)
+
+            elif validation_response.status == "valid" and validation_response.details:
+                print(f"[ENDPOINT] Code valid. Proceeding to stream agent directly without explicit validation message in UI.")
+                details = validation_response.details
+                agent_to_run_selected = None
+                initial_agent_message_content = ""
+
+                if details.code_type == "new_registration": # "100"
+                    agent_to_run_selected = new_registration_agent
+                    initial_agent_message_content = (
+                        f"Starting registration with the following context provided from the validated code:\n"
+                        f"- Membership Status: new\n"
+                        f"- Team Name: {details.team_name}\n"
+                        f"- Age Group: u{details.age_group}s\n"
+                        f"- Registration Season: {details.season_start_year % 100}{details.season_end_year % 100}\n"
+                        f"(Based on validated raw code: {details.raw_code})"
+                    )
+                elif details.code_type == "renewal_registration": # "200"
+                    agent_to_run_selected = renew_registration_agent
+                    initial_agent_message_content = (
+                        f"Starting renewal with the following context provided from the validated code:\n"
+                        f"- Membership Status: renew\n"
+                        f"- Team Name: {details.team_name}\n"
+                        f"- Age Group: u{details.age_group}s\n"
+                        f"- Registration Season: {details.season_start_year % 100}{details.season_end_year % 100}\n"
+                        f"(Based on validated raw code: {details.raw_code})"
+                    )
+                
+                if agent_to_run_selected:
+                    print(f"[ENDPOINT] Initial message for agent: {initial_agent_message_content}")
+                    agent_input = [{"role": "user", "content": initial_agent_message_content}]
+                    
+                    # Yield from run_agent_stream (which now yields plain JSON strings)
+                    async for agent_event_json_str in run_agent_stream(agent_to_run_selected, agent_input):
+                        yield agent_event_json_str # Pass through the plain JSON string
+                else:
+                    # This case should ideally not be hit if validation implies agent existence
+                    print(f"[ENDPOINT] ERROR: Code valid but no agent selected for type '{details.code_type}'")
+                    error_event = { "event_type": "ServerError", "data": { "error": "Internal configuration error: No agent for valid code type."}}
+                    yield json.dumps(error_event) # Yield plain JSON
+            
+        except Exception as e:
+            print(f"Error in chat_stream_endpoint event_generator: {e}")
+            # Ensure some error message is sent to the client
+            error_event = {
+                "event_type": "ServerError", # General server error
+                "data": {"error": f"Failed to process chat stream: {str(e)}"}
+            }
+            yield json.dumps(error_event) # Yield plain JSON
+
+    return EventSourceResponse(event_generator())
 
 # Main execution block (for running with uvicorn)
 if __name__ == "__main__":
