@@ -339,7 +339,8 @@ export default function ChatPage() {
                                     dispatch({ type: 'START_ASSISTANT_MESSAGE', payload: { id: parsedEvent.data.id, agentName: parsedEvent.data.agent_name || 'Assistant' } });
                                 } else if (parsedEvent.event_type === 'RawResponsesStreamEvent' && parsedEvent.data?.delta) {
                                     if (activeMessageId) {
-                                        dispatch({ type: 'APPEND_DELTA', payload: { id: activeMessageId, delta: parsedEvent.data.delta } });
+                                        // DO NOT dispatch APPEND_DELTA here to prevent flash of raw JSON
+                                        // dispatch({ type: 'APPEND_DELTA', payload: { id: activeMessageId, delta: parsedEvent.data.delta } });
                                         
                                         currentAssistantJsonBuffer.current += parsedEvent.data.delta;
                                     }
