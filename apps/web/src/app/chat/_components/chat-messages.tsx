@@ -15,14 +15,13 @@ interface Message {
 
 interface MessageListProps {
     messages: Message[];
-    isLoading: boolean;
     loadingMessageId: string | null;
 }
 
 // Flag to toggle avatar rendering
 const AVATAR_ON = true; // Set to false to hide avatars
 
-const MessageList: React.FC<MessageListProps> = ({ messages, isLoading, loadingMessageId }) => {
+const MessageList: React.FC<MessageListProps> = ({ messages, loadingMessageId }) => {
 
     const copyToClipboard = async (text: string) => {
         try {

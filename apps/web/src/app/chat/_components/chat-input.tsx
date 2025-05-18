@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { SendHorizonal, ArrowUp, Plus, RotateCcw } from 'lucide-react'; // Added RotateCcw
+import { ArrowUp, Plus, RotateCcw } from 'lucide-react'; // Added RotateCcw, REMOVED SendHorizonal
 import { cn } from '@/lib/utils'; // Import cn
 import TextareaAutosize from 'react-textarea-autosize'; // Import the library
 

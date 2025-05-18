@@ -168,6 +168,19 @@ export default function ChatPage() {
     const userJustSentRef = useRef(false); 
     const lastUserSend = useRef<number>(0);
 
+    // Helper to scroll the sentinel into view (guaranteed to exist when chat has started)
+    const scrollMessagesToBottom = useCallback((smooth: boolean = true) => {
+        if (endOfMessagesRef.current) {
+            endOfMessagesRef.current.scrollIntoView({
+                behavior: smooth ? 'smooth' : 'auto',
+                block: 'start',
+            });
+        } else if (scrollRef.current) {
+            // Fallback: manual scroll
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+    }, []);
+
     // Scroll to bottom effect (keep as is for now, depends on loadingMessageId)
     useEffect(() => {
         if (Date.now() - lastUserSend.current < 300) return;
@@ -205,7 +218,7 @@ export default function ChatPage() {
         }
         // reset signal
         if (userJustSentRef.current) userJustSentRef.current = false;
-    }, [messageOrder, isAtBottom]);
+    }, [messageOrder, isAtBottom, scrollMessagesToBottom]);
 
     const scrollToBottom = () => {
         if (scrollRef.current) {
@@ -221,19 +234,6 @@ export default function ChatPage() {
         // Could add confirmation dialog here if desired
         dispatch({ type: 'RESET_CHAT' });
     }, [dispatch]);
-
-    // Helper to scroll the sentinel into view (guaranteed to exist when chat has started)
-    const scrollMessagesToBottom = useCallback((smooth: boolean = true) => {
-        if (endOfMessagesRef.current) {
-            endOfMessagesRef.current.scrollIntoView({
-                behavior: smooth ? 'smooth' : 'auto',
-                block: 'start',
-            });
-        } else if (scrollRef.current) {
-            // Fallback: manual scroll
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-        }
-    }, []);
 
     const handleSendMessage = useCallback(async (userInput: string) => {
         if (state.isLoading) return;
@@ -272,7 +272,8 @@ export default function ChatPage() {
          };
 
         try {
-            const response = await fetch('http://localhost:8000/chat/stream', {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'; // Fallback for local dev
+            const response = await fetch(`${apiUrl}/chat/stream`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -325,9 +326,10 @@ export default function ChatPage() {
                 } 
             } 
 
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("Chat stream error:", error);
-             dispatch({ type: 'SET_ERROR', payload: { errorContent: error.message || 'Unknown fetch error' } });
+            const errorMessage = error instanceof Error ? error.message : 'Unknown fetch error';
+             dispatch({ type: 'SET_ERROR', payload: { errorContent: errorMessage } });
         }
 
         // After message is inside the DOM, ensure the user bubble is positioned at top of the scroll container
@@ -344,7 +346,7 @@ export default function ChatPage() {
                 }
             });
         });
-    }, [state.isLoading, state.messageOrder, state.messages, orderedMessages]); // Keep dependencies
+    }, [state.isLoading, state.messageOrder, state.messages, orderedMessages, scrollMessagesToBottom]);
 
     return (
         <div
@@ -398,7 +400,6 @@ export default function ChatPage() {
                         <>
                             <ChatMessages 
                                 messages={orderedMessages} 
-                                isLoading={isLoading} 
                                 loadingMessageId={loadingMessageId}
                             />
 
