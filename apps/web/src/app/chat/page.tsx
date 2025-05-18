@@ -310,7 +310,32 @@ export default function ChatPage() {
                             if (jsonData && jsonData.toUpperCase() !== '[DONE]') {
                                 const parsedData = JSON.parse(jsonData);
                                 
-                                if (parsedData.event_type === 'RawResponsesStreamEvent' && parsedData.data?.delta) {
+                                if (parsedData.event_type === 'code_validation_result') {
+                                    console.log("Received code_validation_result:", parsedData.data);
+                                    
+                                    const validationMsgId = `validation-${Date.now()}`;
+                                    dispatch({ 
+                                        type: 'START_ASSISTANT_MESSAGE', 
+                                        payload: { id: validationMsgId, agentName: "Code Validator" } 
+                                    });
+                            
+                                    let validationContent = `Code: ${parsedData.data.raw_code} - Status: ${parsedData.data.status}`;
+                                    if (parsedData.data.reason) {
+                                        validationContent += `\nReason: ${parsedData.data.reason}`;
+                                    }
+                                    if (parsedData.data.details) {
+                                        validationContent += `\nDetails: ${JSON.stringify(parsedData.data.details, null, 2)}`;
+                                    }
+                                    // Ensure newlines are rendered in HTML if this content goes into a <pre> or similar
+                                    // For now, \n should work if the chat message component handles it (e.g., via CSS white-space: pre-wrap)
+                                    dispatch({ 
+                                        type: 'APPEND_DELTA', 
+                                        payload: { id: validationMsgId, delta: validationContent }
+                                    });
+                            
+                                    dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: validationMsgId } });
+
+                                } else if (parsedData.event_type === 'RawResponsesStreamEvent' && parsedData.data?.delta) {
                                     // Dispatch APPEND_DELTA directly
                                     dispatch({ type: 'APPEND_DELTA', payload: { id: assistantMessageIdForThisStream, delta: parsedData.data.delta } });
                                 } else if (parsedData.event_type === 'AgentUpdatedStreamEvent' && parsedData.data?.agent_name) {
@@ -391,7 +416,7 @@ export default function ChatPage() {
                     {/* Welcome Text */} 
                     {!hasStarted && (
                         <h1 className="text-2xl font-medium text-center text-gray-700 dark:text-gray-300"> 
-                            Welcome to Urmston Town Juniors FC<br />What can I help you with today?
+                            Welcome to the for Urmston Town Juniors FC Registration Portal.<br />Please enter your registration code below to begin.
                         </h1>
                     )}
 

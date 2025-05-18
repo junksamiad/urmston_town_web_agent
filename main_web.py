@@ -4,12 +4,13 @@
 
 import asyncio
 import os
+import re # <--- ADDED IMPORT
 from fastapi import FastAPI, Request
 from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 import json # To send JSON in SSE
-from pydantic import BaseModel, Field # Added BaseModel, Field
-from typing import List, Optional, Dict, Any # Added List, Optional, Dict, Any
+from pydantic import BaseModel, Field, validator # Added BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal # Added List, Optional, Dict, Any, Literal
 from fastapi.middleware.cors import CORSMiddleware # <-- Import CORS Middleware
 
 # Import specific event types for streaming
@@ -43,6 +44,22 @@ class ChatRequest(BaseModel):
     history: Optional[List[ChatMessageInput]] = Field(default_factory=list, description="Previous messages in the conversation.")
     session_id: Optional[str] = Field(None, description="Unique identifier for the chat session.")
     last_agent_name: Optional[str] = Field(None, description="Name of the agent that responded last.")
+    registration_code: Optional[str] = Field(None, description="The unique registration code entered by the user.") # NEW FIELD
+
+# NEW Pydantic Models for Registration Code
+class RegistrationCodeDetails(BaseModel):
+    code_type: Literal["new_registration", "renewal_registration"]
+    team_name: str
+    age_group: int
+    season_start_year: int
+    season_end_year: int
+    raw_code: str # Store the original code for reference
+
+class CodeValidationResponse(BaseModel):
+    status: Literal["valid", "invalid"]
+    details: Optional[RegistrationCodeDetails] = None
+    reason: Optional[str] = None
+    raw_code: str
 
 # --- End Pydantic Models ---
 
@@ -138,6 +155,88 @@ AGENT_REGISTRY: Dict[str, Agent] = {
 print("Agents imported and defined.")
 print(f"Agent Registry contains: {list(AGENT_REGISTRY.keys())}")
 
+# NEW: Function to parse and validate the registration code
+def parse_and_validate_registration_code(code: str) -> CodeValidationResponse:
+    parts = code.strip().split('-')
+    raw_code = code # Keep original for response
+
+    if len(parts) != 4:
+        return CodeValidationResponse(status="invalid", reason="Code does not have 4 parts separated by hyphens.", raw_code=raw_code)
+
+    code_type_str, team_name_str, age_group_str, season_str = parts
+
+    # Validate code_type
+    if code_type_str == "100": # Note: User mentioned "001 or 002" then "100 or 200". Assuming "100" and "200" based on examples.
+        parsed_code_type = "new_registration"
+    elif code_type_str == "200":
+        parsed_code_type = "renewal_registration"
+    else:
+        return CodeValidationResponse(status="invalid", reason=f"Invalid code type: '{code_type_str}'. Must be '100' or '200'.", raw_code=raw_code)
+
+    # Validate team_name (basic validation: not empty and reasonably alphanumeric)
+    if not team_name_str or not re.match(r"^[a-zA-Z0-9_]+$", team_name_str): # Allow alphanumeric and underscore for team names
+        return CodeValidationResponse(status="invalid", reason="Team name cannot be empty and should be alphanumeric.", raw_code=raw_code)
+    
+    # Validate age_group
+    if not age_group_str.isdigit() or not (1 <= len(age_group_str) <= 2):
+        return CodeValidationResponse(status="invalid", reason=f"Invalid age group: '{age_group_str}'. Must be a 1 or 2 digit number.", raw_code=raw_code)
+    parsed_age_group = int(age_group_str)
+    if not (1 <= parsed_age_group <= 21): # Example reasonable age range for youth football
+        return CodeValidationResponse(status="invalid", reason=f"Age group '{parsed_age_group}' out of typical range (1-21).", raw_code=raw_code)
+
+
+    # Validate season
+    if not season_str.isdigit() or len(season_str) != 4:
+        return CodeValidationResponse(status="invalid", reason=f"Invalid season format: '{season_str}'. Must be 4 digits (e.g., 2526).", raw_code=raw_code)
+    
+    season_start_yy_str = season_str[:2]
+    season_end_yy_str = season_str[2:]
+
+    if not season_start_yy_str.isdigit() or not season_end_yy_str.isdigit():
+        return CodeValidationResponse(status="invalid", reason=f"Season year parts '{season_start_yy_str}' or '{season_end_yy_str}' are not numeric.", raw_code=raw_code)
+
+    season_start_yy = int(season_start_yy_str)
+    season_end_yy = int(season_end_yy_str)
+
+    # Basic check for season validity (e.g., end year is start year + 1, handles 9900 for YY(YY+1) )
+    if season_end_yy != (season_start_yy + 1) % 100:
+        return CodeValidationResponse(status="invalid", reason=f"Invalid season progression: '{season_str}'. End year short-form should be start year short-form + 1.", raw_code=raw_code)
+
+    # Determine full years (e.g. 2526 -> 2025, 2026; 9900 -> 1999, 2000)
+    # This assumes current century for YY < 50 (e.g. 25 -> 2025) and previous for YY >=50 (e.g. 99 -> 1999)
+    # This is a common way to infer century but can be adjusted.
+    base_start_year = 2000 + season_start_yy if season_start_yy < 50 else 1900 + season_start_yy
+    
+    # Calculate end year based on start year and short end year
+    # If end_yy is 00 and start_yy is 99, it's a century crossover
+    if season_start_yy == 99 and season_end_yy == 0:
+        base_end_year = base_start_year + 1 
+    else: # normal progression within the same inferred century for start_year
+        base_end_year = (base_start_year // 100) * 100 + season_end_yy
+        # If, due to YY interpretation, end year appears before start (e.g. start 2099, end_yy 00 implies 2000, not 2100)
+        # This means we crossed a century based on the YY values.
+        if base_end_year < base_start_year:
+             base_end_year += 100
+
+
+    details = RegistrationCodeDetails(
+        code_type=parsed_code_type,
+        team_name=team_name_str,
+        age_group=parsed_age_group,
+        season_start_year=base_start_year,
+        season_end_year=base_end_year,
+        raw_code=raw_code
+    )
+    return CodeValidationResponse(status="valid", details=details, raw_code=raw_code)
+
+# NEW: Streaming generator for code validation response
+async def stream_code_validation_result(validation_response: CodeValidationResponse):
+    """Yields a single JSON event for code validation."""
+    yield json.dumps({"event_type": "code_validation_result", "data": validation_response.model_dump()})
+    # To keep SSE connection alive briefly if client expects it before closing or for more events
+    # For this specific case, one event might be enough, and client can disconnect.
+    # await asyncio.sleep(1) # Optional: keep alive for a second
+
 # --- End Agent Imports and Definitions ---
 
 # --- Streaming Logic ---
@@ -213,8 +312,27 @@ async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]
         # Yield an error event to the frontend
         yield json.dumps({"event_type": "ServerError", "data": {"error": str(e)}})
 
+# NEW: Simple echo stream generator
+async def stream_echo_response(user_message: str):
+    """Yields the user's message back as a mock assistant response."""
+    assistant_message_id = f"echo-assistant-{hash(user_message)}" 
 
-# --- End Streaming Logic ---
+    yield json.dumps({
+        "event_type": "START_ASSISTANT_MESSAGE", 
+        "data": {"id": assistant_message_id, "agent_name": "Echo Bot"}
+    })
+    
+    yield json.dumps({
+        "event_type": "RawResponsesStreamEvent", 
+        "data": { 
+            "delta": user_message 
+        }
+    })
+
+    yield json.dumps({
+        "event_type": "COMPLETE_ASSISTANT_MESSAGE", 
+        "data": {"id": assistant_message_id}
+    })
 
 # FastAPI app instance
 app = FastAPI()
@@ -247,29 +365,57 @@ async def initial_connection_stream():
         # yield json.dumps({"event_type": "keepalive"})
 
 @app.post("/chat/stream") 
-async def chat_stream_endpoint(chat_request: ChatRequest): # Changed Request to ChatRequest
-    """Handles chat requests and streams back agent responses using SSE."""
+async def chat_stream_endpoint(chat_request: ChatRequest): 
+    """
+    Handles chat requests. 
+    If user_message is treated as a registration code, it validates it and streams back the result.
+    Otherwise, (eventually) streams back agent responses using SSE.
+    """
+
+    potential_code = chat_request.user_message 
+    print(f"Received potential registration code: {potential_code}")
+
+    # --- REGISTRATION CODE VALIDATION LOGIC ---
+    validation_response = parse_and_validate_registration_code(potential_code)
+    print(f"Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
     
-    # --- Determine Agent to Run --- 
-    if chat_request.last_agent_name and chat_request.last_agent_name in AGENT_REGISTRY:
-        agent_to_run = AGENT_REGISTRY[chat_request.last_agent_name]
-        print(f"Continuing conversation with: {agent_to_run.name}")
-    else:
-        agent_to_run = router_agent # Default to router agent for new conversations
-        print(f"Starting new conversation with: {agent_to_run.name}")
+    return EventSourceResponse(stream_code_validation_result(validation_response))
 
-    # --- Prepare Agent Input --- 
-    # Convert Pydantic models back to simple dicts for the agent input list
-    history_dicts = [msg.model_dump() for msg in chat_request.history] if chat_request.history else []
-    agent_input = history_dicts + [{
-        "role": "user", 
-        "content": chat_request.user_message
-    }]
-    print(f"Agent Input ({len(agent_input)} messages): {agent_input}")
+    # --- TEMPORARY ECHO LOGIC (Now replaced by code validation logic above) ---
+    # print(f"Received user message for echo: {chat_request.user_message}")
+    # echo_event_generator = stream_echo_response(chat_request.user_message)
+    # return EventSourceResponse(echo_event_generator)
 
-    # --- Run Agent and Stream Events --- 
-    event_generator = run_agent_stream(agent_to_run, agent_input)
-    return EventSourceResponse(event_generator)
+    # --- ORIGINAL AGENT LOGIC (Still Commented out) ---
+    # # --- NEW: Handle Registration Code if present --- 
+    # # This block would be used if chat_request.registration_code was populated by frontend
+    # if chat_request.registration_code:
+    #     print(f"Received registration code: {chat_request.registration_code}")
+    #     validation_response = parse_and_validate_registration_code(chat_request.registration_code)
+    #     print(f"Validation result: {validation_response.status}, Reason: {validation_response.reason if validation_response.reason else 'N/A'}")
+    #     return EventSourceResponse(stream_code_validation_result(validation_response))
+    # # --- END NEW ---
+    
+    # # --- Determine Agent to Run --- 
+    # if chat_request.last_agent_name and chat_request.last_agent_name in AGENT_REGISTRY:
+    #     agent_to_run = AGENT_REGISTRY[chat_request.last_agent_name]
+    #     print(f"Continuing conversation with: {agent_to_run.name}")
+    # else:
+    #     agent_to_run = router_agent # Default to router agent for new conversations
+    #     print(f"Starting new conversation with: {agent_to_run.name}")
+
+    # # --- Prepare Agent Input --- 
+    # history_dicts = [msg.model_dump() for msg in chat_request.history] if chat_request.history else []
+    # agent_input = history_dicts + [{
+    #     "role": "user", 
+    #     "content": chat_request.user_message
+    # }]
+    # print(f"Agent Input ({len(agent_input)} messages): {agent_input}")
+
+    # # --- Run Agent and Stream Events --- 
+    # event_generator = run_agent_stream(agent_to_run, agent_input)
+    # return EventSourceResponse(event_generator)
+    # --- END OF ORIGINAL AGENT LOGIC ---
 
 # Main execution block (for running with uvicorn)
 if __name__ == "__main__":
