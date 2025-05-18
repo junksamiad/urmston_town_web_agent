@@ -339,10 +339,26 @@ export default function ChatPage() {
                                     dispatch({ type: 'START_ASSISTANT_MESSAGE', payload: { id: parsedEvent.data.id, agentName: parsedEvent.data.agent_name || 'Assistant' } });
                                 } else if (parsedEvent.event_type === 'RawResponsesStreamEvent' && parsedEvent.data?.delta) {
                                     if (activeMessageId) {
-                                        // DO NOT dispatch APPEND_DELTA here to prevent flash of raw JSON
-                                        // dispatch({ type: 'APPEND_DELTA', payload: { id: activeMessageId, delta: parsedEvent.data.delta } });
-                                        
                                         currentAssistantJsonBuffer.current += parsedEvent.data.delta;
+                                        // Attempt to parse the buffer and update content if agent_response_text is available
+                                        try {
+                                            const parsedBuffer = JSON.parse(currentAssistantJsonBuffer.current);
+                                            if (parsedBuffer.agent_response_text !== undefined) {
+                                                dispatch({
+                                                    type: 'UPDATE_ASSISTANT_JSON_CONTENT',
+                                                    payload: {
+                                                        id: activeMessageId,
+                                                        agentResponseText: parsedBuffer.agent_response_text,
+                                                        overallTaskComplete: parsedBuffer.overall_task_complete || false, 
+                                                        passOffToAgent: parsedBuffer.pass_off_to_agent || null
+                                                    }
+                                                });
+                                            }
+                                        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                                        } catch (_e) {
+                                            // console.log("Incremental parse failed, waiting for more chunks:", _e); // Optional: for debugging
+                                            // Intentionally ignore parsing errors for incomplete JSON, wait for more chunks
+                                        }
                                     }
                                 } else if (parsedEvent.event_type === 'AgentUpdatedStreamEvent' && parsedEvent.data?.agent_name) {
                                     if (activeMessageId) {
