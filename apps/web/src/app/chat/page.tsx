@@ -170,6 +170,7 @@ export default function ChatPage() {
     const hasStarted = state.messageOrder.length > 0;
 
     const currentAssistantJsonBuffer = useRef<string>("");
+    const nextAgentNameRef = useRef<string | null>(null); // Stores the agent name for the NEXT request
 
     // Ref for the scrollable message container
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -288,9 +289,10 @@ export default function ChatPage() {
         const requestBodyData = {
              user_message: userInput,
              history: historyForBackend,
-             last_agent_name: orderedMessages.length > 0 && orderedMessages[orderedMessages.length-1].role === 'assistant' ? orderedMessages[orderedMessages.length-1].agentName : null,
+             last_agent_name: nextAgentNameRef.current, // Use the stored next agent name
              session_id: localStorage.getItem('session_id') || undefined,
          };
+         nextAgentNameRef.current = null; // Reset after use, will be set by completing agent if needed
 
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -366,34 +368,57 @@ export default function ChatPage() {
                                     }
                                 } else if (parsedEvent.event_type === 'COMPLETE_ASSISTANT_MESSAGE') {
                                     if (activeMessageId && activeMessageId === parsedEvent.data.id) { 
-                                        let finalContent = currentAssistantJsonBuffer.current;
+                                        console.log("[COMPLETE] ActiveMessageId:", activeMessageId);
+                                        // const currentMessageFromState = state.messages[activeMessageId]; // Not strictly needed for next agent logic
+                                        // console.log("[COMPLETE] currentMessageFromState:", currentMessageFromState);
+                                        // console.log("[COMPLETE] currentMessageFromState?.agentName:", currentMessageFromState?.agentName);
+
+                                        let finalAgentNameForNextTurn: string | null = null;
+                                        // const currentAgentName = currentMessageFromState?.agentName; // Not needed for this logic
+
                                         try {
                                             const structuredResp = JSON.parse(currentAssistantJsonBuffer.current);
                                             if (structuredResp.agent_response_text !== undefined) {
-                                                finalContent = structuredResp.agent_response_text;
                                                 dispatch({ 
                                                     type: 'UPDATE_ASSISTANT_JSON_CONTENT', 
                                                     payload: { 
                                                         id: activeMessageId, 
-                                                        agentResponseText: finalContent,
+                                                        agentResponseText: structuredResp.agent_response_text,
                                                         overallTaskComplete: structuredResp.overall_task_complete || false,
                                                         passOffToAgent: structuredResp.pass_off_to_agent || null
                                                     }
                                                 });
-                                            } else {
-                                                console.warn("COMPLETE_ASSISTANT_MESSAGE: Parsed JSON, but no agent_response_text. Raw deltas remain.");
                                             }
+
+                                            // --- UPDATED LOGIC FOR DETERMINING NEXT AGENT ---
+                                            const passOffToAgentValue = structuredResp.pass_off_to_agent;
+
+                                            if (typeof passOffToAgentValue === 'string' && passOffToAgentValue.trim() !== '') {
+                                                finalAgentNameForNextTurn = passOffToAgentValue.trim();
+                                                console.log(`Next agent for client (derived from pass_off_to_agent): ${finalAgentNameForNextTurn}`);
+                                            } else {
+                                                // If pass_off_to_agent is null, empty, or not a string (should not happen with current backend Pydantic model)
+                                                // Default to null, letting the backend router (or default logic) decide.
+                                                finalAgentNameForNextTurn = null; 
+                                                console.log(`Next agent for client (pass_off_to_agent was invalid or null): Router/null`);
+                                            }
+                                            // --- END UPDATED LOGIC ---
+
                                         } catch (parseError) { 
-                                            console.warn("Final JSON parse failed on complete in fetch stream. Content remains raw deltas. Error:", parseError);
+                                            console.warn("Final JSON parse failed on complete in fetch stream. Cannot determine next agent. Error:", parseError);
+                                            finalAgentNameForNextTurn = null; // Default if parsing fails
                                         }
                                         
+                                        nextAgentNameRef.current = finalAgentNameForNextTurn;
+
                                         dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: parsedEvent.data.id } });
                                         currentAssistantJsonBuffer.current = "";
                                         activeMessageId = ""; 
                                     }
                                 } else if (parsedEvent.event_type === 'code_validation_result') {
                                     console.log("Received code_validation_result:", parsedEvent.data); 
-
+                                    // Validation Service is self-contained; does not set next agent for main flow.
+                                    // nextAgentNameRef.current should remain as it was or null.
                                     if (activeMessageId) { 
                                         let valText = "Code validation result received."; // Default text
                                         if (parsedEvent.data?.status === 'invalid' && parsedEvent.data?.display_message) {
@@ -426,6 +451,9 @@ export default function ChatPage() {
                                         console.warn("code_validation_result received but no activeMessageId was set. This indicates the preceding START_ASSISTANT_MESSAGE for validation was missed or cleared prematurely.");
                                     }
                                 } else if (parsedEvent.event_type === 'ServerError' || parsedEvent.event_type === 'AgentErrorEvent') {
+                                     // For server/agent errors, we don't want to assume a next agent.
+                                     // Let it be null, so the router picks up next, or user re-initiates.
+                                     nextAgentNameRef.current = null;
                                      dispatch({ type: 'SET_ERROR', payload: { errorContent: parsedEvent.data?.error || 'Unknown backend error' } });
                                      if(activeMessageId) dispatch({ type: 'COMPLETE_ASSISTANT_MESSAGE', payload: { id: activeMessageId } });
                                      break; 

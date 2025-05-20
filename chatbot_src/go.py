@@ -10,7 +10,7 @@ from typing import Literal, Optional # Keep these if needed elsewhere
 from agents import Agent, InputGuardrail, GuardrailFunctionOutput, Runner, RunContextWrapper, function_tool 
 
 # --- Import Standardized Prompt Prefix ---
-from .prompt_prefix import format_prompt_with_prefix
+from .formatting_prompt import format_prompt_with_prefix
 
 # --- Import Registration Components (Updated) ---
 from .registration import registration_agent, RegistrationSummary, renew_registration_agent, new_registration_agent, code_verification_agent # Added code_verification_agent

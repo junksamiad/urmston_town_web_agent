@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, validator # Added BaseModel, Field
 from typing import List, Optional, Dict, Any, Literal # Added List, Optional, Dict, Any, Literal
 from fastapi.middleware.cors import CORSMiddleware # <-- Import CORS Middleware
 import uuid # Add for generating unique IDs
+from copy import deepcopy # NEW IMPORT
 
 # Import specific event types for streaming
 from agents.stream_events import (
@@ -45,7 +46,6 @@ class ChatRequest(BaseModel):
     history: Optional[List[ChatMessageInput]] = Field(default_factory=list, description="Previous messages in the conversation.")
     session_id: Optional[str] = Field(None, description="Unique identifier for the chat session.")
     last_agent_name: Optional[str] = Field(None, description="Name of the agent that responded last.")
-    registration_code: Optional[str] = Field(None, description="The unique registration code entered by the user.") # NEW FIELD
 
 # NEW Pydantic Models for Registration Code
 class RegistrationCodeDetails(BaseModel):
@@ -70,14 +70,16 @@ from agents import Agent, Runner # Import SDK components
 
 # Import agents from our chatbot source package
 from chatbot_src.registration import (
-    # code_verification_agent, # REMOVED
-    # registration_agent,      # REMOVED
     renew_registration_agent,
     new_registration_agent,
-    RegistrationSummary 
+    RegistrationSummary,
+    new_registration_agent_main_instructions
 )
 # Import tools if needed directly (though agents should encapsulate them)
 # from chatbot_src.tools import validate_registration_code
+
+# Import formatting guidelines
+from chatbot_src.formatting_prompt import append_formatting_guidelines # Ensure this is imported
 
 # Define Classification Rules (copied from go.py)
 query_classification_list = """ 
@@ -118,7 +120,7 @@ query_classification_list = """
 # Define Placeholder Payments Agent 
 payments_agent = Agent(
     name="Payments Agent", 
-    instructions="You handle payment queries related to Urmston Town Juniors FC." # Slightly more specific
+    instructions="You handle payment queries related to Urmston Town Juniors FC. Your capabilities are currently under development. Please inform the user that payment-related functionalities will be available soon."
 )
 
 # Define Router Agent 
@@ -146,12 +148,9 @@ If the query is ambiguous and you cannot confidently classify it based on the po
 
 # Agent Registry for easy lookup by name
 AGENT_REGISTRY: Dict[str, Agent] = {
-    router_agent.name: router_agent, 
-    # code_verification_agent.name: code_verification_agent, # REMOVED
-    # registration_agent.name: registration_agent,          # REMOVED
     payments_agent.name: payments_agent,
     new_registration_agent.name: new_registration_agent, 
-    renew_registration_agent.name: renew_registration_agent, 
+    renew_registration_agent.name: renew_registration_agent,
 }
 
 print("Agents imported and defined.")
@@ -235,10 +234,15 @@ def parse_and_validate_registration_code(code: str) -> CodeValidationResponse:
 
 # --- Streaming Logic ---
 
-async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]]):
+async def run_agent_stream(
+    agent_to_run: Agent, 
+    messages_input: List[Dict[str, Any]], # RENAMED and RE-TYPED: This is now just the list of messages
+    response_accumulator: Dict[str, str] # For collecting the full JSON response
+):
     """Runs the agent using run_streamed and yields JSON serializable events."""
     assistant_message_id = f"asst_{uuid.uuid4()}" # Generate a unique ID for this agent's response stream
     agent_name_to_yield = agent_to_run.name # Get agent name
+    response_accumulator["final_json_response"] = "" # Initialize accumulator
 
     try:
         # 1. Yield START_ASSISTANT_MESSAGE as plain JSON
@@ -249,22 +253,29 @@ async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]
         print(f"DEBUG: run_agent_stream yielding START_ASSISTANT_MESSAGE: {json.dumps(start_event_data)}")
         yield json.dumps(start_event_data) # Yield plain JSON
 
-        print(f"Running agent {agent_name_to_yield} with streaming...")
-        # Corrected agent streaming call
-        result_stream_obj = Runner.run_streamed(agent_to_run, agent_input)
+        print(f"Running agent {agent_name_to_yield} with streaming messages_input: {messages_input}")
+        
+        # The messages_input IS the direct input for the runner.
+        # Template variables for agent instructions must be handled *before* this function is called,
+        # by creating/configuring the agent_to_run with its fully formatted instructions.
+
+        print(f"DEBUG: Runner.run_streamed called with agent: {agent_to_run.name} and messages: {messages_input}")
+        # Ensure messages_input is a list of dicts as expected by the SDK
+        # Example: [{"role": "user", "content": "Hello there"}]
+
+        result_stream_obj = Runner.run_streamed(agent_to_run, messages_input) # SIMPLIFIED CALL
         async for event in result_stream_obj.stream_events():
             event_type = event.__class__.__name__
             event_data = None
             if isinstance(event, RawResponsesStreamEvent):
                 if hasattr(event, 'data') and hasattr(event.data, 'delta') and event.data.delta is not None:
-                    event_data = {"delta": event.data.delta}
-                    print(f"BACKEND RawResponsesStreamEvent DELTA: -->{event.data.delta}<--")
-                # else:
-                #     # Log other types of RawResponsesStreamEvent if needed for debugging
-                #     # For now, we only care about deltas for direct streaming to UI
-                #     response_type = event.raw_response.type if hasattr(event.raw_response, 'type') else "N/A"
-                #     # print(f"BACKEND RawResponsesStreamEvent: Non-delta type or missing type attribute: {response_type}")
-                #     pass # Don't yield non-delta RawResponsesStreamEvents for now
+                    delta_content = event.data.delta
+                    if isinstance(delta_content, str): # Ensure delta is a string
+                        response_accumulator["final_json_response"] += delta_content # Accumulate
+                        event_data = {"delta": delta_content}
+                        print(f"BACKEND RawResponsesStreamEvent DELTA: -->{delta_content}<--")
+                    else:
+                        print(f"BACKEND RawResponsesStreamEvent: Delta is not a string: {type(delta_content)}")
 
             elif isinstance(event, RunItemStreamEvent):
                 print(f"BACKEND RunItemStreamEvent received: name={event.name}, item_type={type(event.item).__name__}")
@@ -272,8 +283,9 @@ async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]
             elif isinstance(event, AgentUpdatedStreamEvent):
                 # Corrected way to access the new agent's name
                 if hasattr(event, 'new_agent') and hasattr(event.new_agent, 'name'):
-                    event_data = {"agent_name": event.new_agent.name}
-                    print(f"BACKEND AgentUpdatedStreamEvent: New agent is {event.new_agent.name}")
+                    new_name = event.new_agent.name
+                    event_data = {"agent_name": new_name, "id": assistant_message_id}
+                    print(f"BACKEND AgentUpdatedStreamEvent: New agent is {new_name}")
                 else:
                     print(f"BACKEND AgentUpdatedStreamEvent: Received event but could not find new_agent.name. Event: {event}")
             elif hasattr(event, 'final_output'): # Generic check for final output events
@@ -294,7 +306,7 @@ async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]
                 print(f"BACKEND YIELDING JSON: {json_to_yield}") 
                 yield json_to_yield # Yield plain JSON
             # else:
-            #     # print(f"BACKEND Event Type {event_type} did not produce yieldable event_data (or was handled by specific log, e.g. RunItemStreamEvent).")
+            #     # print(f"BACKEND Event Type {event_type} did not produce yieldable event_data (or was handled by specific log, e.g. RunItemStreamEvent).\n")
             #     pass
         
         # 2. CRITICAL: Yield COMPLETE_ASSISTANT_MESSAGE as plain JSON
@@ -309,11 +321,17 @@ async def run_agent_stream(agent_to_run: Agent, agent_input: List[Dict[str, Any]
         print(f"Error in run_agent_stream for {agent_name_to_yield}: {e}")
         error_event = {
             "event_type": "AgentErrorEvent",  # Consistent error event type
-            "data": {"error": str(e), "agent_name": agent_name_to_yield}
+            "data": {"error": str(e), "agent_name": agent_name_to_yield, "id": assistant_message_id } # Include ID
         }
-        yield json.dumps(error_event) # Yield plain JSON
+        # Ensure COMPLETE is sent for this message ID if an error occurs mid-stream after START
+        yield json.dumps(error_event)
+        yield json.dumps({
+            "event_type": "COMPLETE_ASSISTANT_MESSAGE",
+            "data": {"id": assistant_message_id},
+        })
+
     finally:
-        print(f"Agent {agent_name_to_yield} streaming finished.")
+        print(f"Agent {agent_name_to_yield} streaming finished. Accumulated JSON: {response_accumulator['final_json_response']}")
 
 # NEW: Simple echo stream generator
 async def stream_echo_response(user_message: str):
@@ -370,108 +388,167 @@ async def initial_connection_stream():
 @app.post("/chat/stream") 
 async def chat_stream_endpoint(chat_request: ChatRequest):
     """
-    Handles chat requests.
-    If user_message is treated as a registration code, it validates it, 
-    then routes to the appropriate registration agent with extracted details.
-    Otherwise, (eventually) streams back other agent responses using SSE.
+    Handles chat requests in a turn-based manner.
+    One agent runs per request. The client uses flags from the agent's response
+    to determine the 'last_agent_name' for the next request.
     """
 
-    potential_code = chat_request.user_message 
-    print(f"[ENDPOINT] Received potential registration code: {potential_code}")
+    print(f"[ENDPOINT] Received: User='{chat_request.user_message}', LastAgent='{chat_request.last_agent_name}', HistoryEmpty={not chat_request.history}")
 
     async def event_generator():
-        validation_message_id = f"val_{uuid.uuid4()}" # Unique ID for the validation message sequence
+        turn_conversation_history: List[ChatMessageInput] = list(chat_request.history) if chat_request.history else []
         
-        try:
-            # Attempt to parse and validate the code
-            validation_response = parse_and_validate_registration_code(potential_code)
-            print(f"[ENDPOINT] Validation result: {validation_response.status}, Reason: {validation_response.reason or 'N/A'}")
+        current_user_message_content = chat_request.user_message
+        
+        # Append current user message to this turn's history if it's not a duplicate of the last user message
+        # This handles cases where a user might resubmit, but assumes history from client is the source of truth.
+        if not turn_conversation_history or \
+           not (turn_conversation_history[-1].role == "user" and turn_conversation_history[-1].content == current_user_message_content):
+            turn_conversation_history.append(ChatMessageInput(role="user", content=current_user_message_content))
 
-            if validation_response.status == "invalid":
-                # Only send validation events if the code is invalid
-                event_to_yield = {
-                    "event_type": "START_ASSISTANT_MESSAGE",
-                    "data": {"id": validation_message_id, "agent_name": "Validation Service"},
-                }
-                print(f"DEBUG: chat_stream_endpoint yielding START_ASSISTANT_MESSAGE for invalid validation: {json.dumps(event_to_yield)}")
-                yield json.dumps(event_to_yield)
+        active_agent_name: Optional[str] = None
+        agent_initial_context: Optional[Dict[str, Any]] = None
+        run_an_agent_this_turn = False
 
-                validation_data_with_id = validation_response.model_dump(exclude_none=True)
-                validation_data_with_id["id"] = validation_message_id
-                # Replace detailed validation data with a user-friendly message for invalid codes
-                user_friendly_invalid_message = "It seems you have provided an invalid code. Please check again or confirm with your manager that the code is correct."
-                if validation_response.reason: # Optionally append the specific reason if it exists and is simple
-                    # We might want to be careful not to expose too much internal detail in the reason
-                    # For now, let's keep it generic as requested.
-                    pass # user_friendly_invalid_message += f" (Details: {validation_response.reason})"
+        if not chat_request.history: # STRICT: First message from the user
+            print("[ENDPOINT] First message in session. Expecting registration code.")
+            validation_response = parse_and_validate_registration_code(current_user_message_content)
 
-                event_to_yield = {
-                    "event_type": "code_validation_result",
-                    "data": {
-                        "id": validation_message_id, 
-                        "status": "invalid", 
-                        "display_message": user_friendly_invalid_message,
-                        "raw_code": validation_response.raw_code # Still useful for context
-                    }
-                }
-                print(f"DEBUG: chat_stream_endpoint yielding code_validation_result event for invalid code: {json.dumps(event_to_yield)}")
-                yield json.dumps(event_to_yield)
-                
-                event_to_yield = {
-                    "event_type": "COMPLETE_ASSISTANT_MESSAGE",
-                    "data": {"id": validation_message_id},
-                }
-                print(f"DEBUG: chat_stream_endpoint yielding COMPLETE_ASSISTANT_MESSAGE for invalid validation: {json.dumps(event_to_yield)}")
-                yield json.dumps(event_to_yield)
-
-            elif validation_response.status == "valid" and validation_response.details:
-                print(f"[ENDPOINT] Code valid. Proceeding to stream agent directly without explicit validation message in UI.")
+            if validation_response.status == "valid" and validation_response.details:
+                print(f"[ENDPOINT] Registration code '{current_user_message_content}' is VALID for first turn.")
                 details = validation_response.details
-                agent_to_run_selected = None
-                initial_agent_message_content = ""
-
-                if details.code_type == "new_registration": # "100"
-                    agent_to_run_selected = new_registration_agent
-                    initial_agent_message_content = (
-                        f"Starting registration with the following context provided from the validated code:\n"
-                        f"- Membership Status: new\n"
-                        f"- Team Name: {details.team_name}\n"
-                        f"- Age Group: u{details.age_group}s\n"
-                        f"- Registration Season: {details.season_start_year % 100}{details.season_end_year % 100}\n"
-                        f"(Based on validated raw code: {details.raw_code})"
-                    )
-                elif details.code_type == "renewal_registration": # "200"
-                    agent_to_run_selected = renew_registration_agent
-                    initial_agent_message_content = (
-                        f"Starting renewal with the following context provided from the validated code:\n"
-                        f"- Membership Status: renew\n"
-                        f"- Team Name: {details.team_name}\n"
-                        f"- Age Group: u{details.age_group}s\n"
-                        f"- Registration Season: {details.season_start_year % 100}{details.season_end_year % 100}\n"
-                        f"(Based on validated raw code: {details.raw_code})"
-                    )
+                if details.code_type == "new_registration":
+                    active_agent_name = new_registration_agent.name
+                elif details.code_type == "renewal_registration":
+                    active_agent_name = renew_registration_agent.name
                 
-                if agent_to_run_selected:
-                    print(f"[ENDPOINT] Initial message for agent: {initial_agent_message_content}")
-                    agent_input = [{"role": "user", "content": initial_agent_message_content}]
-                    
-                    # Yield from run_agent_stream (which now yields plain JSON strings)
-                    async for agent_event_json_str in run_agent_stream(agent_to_run_selected, agent_input):
-                        yield agent_event_json_str # Pass through the plain JSON string
-                else:
-                    # This case should ideally not be hit if validation implies agent existence
-                    print(f"[ENDPOINT] ERROR: Code valid but no agent selected for type '{details.code_type}'")
-                    error_event = { "event_type": "ServerError", "data": { "error": "Internal configuration error: No agent for valid code type."}}
-                    yield json.dumps(error_event) # Yield plain JSON
+                if active_agent_name:
+                    agent_initial_context = {"parsed_code_details": details.model_dump()}
+                    run_an_agent_this_turn = True
+                else: 
+                    err_msg = f"Valid code type '{details.code_type}' on first turn has no mapped agent."
+                    print(f"[ENDPOINT] ERROR: {err_msg}")
+                    error_message_id = f"val_err_{uuid.uuid4()}"
+                    yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Message"}})
+                    yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, an internal error occurred with the code. Please try again."}})
+                    yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
+                    return
+            else: 
+                print(f"[ENDPOINT] Input '{current_user_message_content}' on first turn is not a valid registration code. Reason: {validation_response.reason if validation_response.reason else 'Not a valid code format.'}")
+                error_message_id = f"val_invalid_{uuid.uuid4()}"
+                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Message"}}) # Changed agent name for clarity
+                yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, you don't seem to have entered a valid code, please try again."}})
+                yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
+                return 
+
+        elif chat_request.last_agent_name: 
+            active_agent_name = chat_request.last_agent_name
+            print(f"[ENDPOINT] Continuing with last agent specified by client: {active_agent_name}")
+            run_an_agent_this_turn = True
+        else:
+            print(f"[ENDPOINT] UNEXPECTED STATE: History not empty, but no last_agent_name provided. User message: '{current_user_message_content}'")
+            error_message_id = f"err_unexpected_state_{uuid.uuid4()}"
+            yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Error"}})
+            yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, an unexpected error occurred. Please try starting a new conversation."}})
+            yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
+            return
+
+        if run_an_agent_this_turn and active_agent_name:
+            base_agent_from_registry = AGENT_REGISTRY.get(active_agent_name)
             
-        except Exception as e:
-            print(f"Error in chat_stream_endpoint event_generator: {e}")
-            # Ensure some error message is sent to the client
-            error_event = {
-                "event_type": "ServerError", # General server error
-                "data": {"error": f"Failed to process chat stream: {str(e)}"}
-            }
-            yield json.dumps(error_event) # Yield plain JSON
+            if not base_agent_from_registry:
+                err_msg = f"Agent '{active_agent_name}' not found in registry."
+                print(f"[ENDPOINT] ERROR: {err_msg}")
+                error_id = f"err_agent_lookup_{uuid.uuid4()}"
+                # Ensure this error also follows the START_ASSISTANT_MESSAGE -> content -> COMPLETE_ASSISTANT_MESSAGE pattern
+                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_id, "agent_name": "System Error"}})
+                # Using RawResponsesStreamEvent for the error content
+                yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": f"Error: {err_msg}"}})
+                yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_id}})
+                return
+
+            agent_to_run_dynamically_configured: Agent = base_agent_from_registry
+
+            if agent_initial_context and base_agent_from_registry.name == new_registration_agent.name:
+                details = agent_initial_context.get("parsed_code_details")
+                if details: 
+                    team_name_for_prompt = details.get("team_name", "Unknown Team")
+                    age_group_val = details.get("age_group")
+                    age_group_for_prompt = f"u{age_group_val}" if age_group_val is not None else "Unknown Age Group"
+                    start_yy = details.get('season_start_year', 0) % 100
+                    end_yy = details.get('season_end_year', 0) % 100
+                    registration_season_for_prompt = f"{start_yy:02d}/{end_yy:02d}"
+                    
+                    # UPDATED LOGIC: Directly format the main instructions template
+                    final_instructions_for_agent = new_registration_agent_main_instructions.format(
+                        **{"Team Name": team_name_for_prompt, "Age Group": age_group_for_prompt, "Registration Season": registration_season_for_prompt}
+                    )
+                    print(f"[ENDPOINT] Initial turn for {new_registration_agent.name}. Dynamically formatted instructions.")
+                    agent_to_run_dynamically_configured = Agent(
+                        name=new_registration_agent.name,
+                        instructions=append_formatting_guidelines(final_instructions_for_agent),
+                        output_type=new_registration_agent.output_type,
+                        tools=deepcopy(new_registration_agent.tools) if new_registration_agent.tools else [],
+                        handoffs=deepcopy(new_registration_agent.handoffs) if new_registration_agent.handoffs else [],
+                    )
+            elif base_agent_from_registry.name == new_registration_agent.name and not agent_initial_context:
+                print(f"[ENDPOINT] Subsequent turn for {new_registration_agent.name}. Using its defined instructions (which should be neutral).")
+                # For subsequent turns, the placeholders for team, age, season in the prompt might not be relevant 
+                # or could be filled with generic values if the .format() call still expects them.
+                # The current new_registration_agent_main_instructions is designed to work even if those are not filled,
+                # as it instructs the agent to check history.
+                # If new_registration_agent_main_instructions strictly requires all keys for .format(),
+                # we need to provide them, e.g., with neutral/default values.
+                # Assuming for now that the agent's own text can handle this.
+                # If new_registration_agent_main_instructions *still* has .format and expects values, provide defaults:
+                try:
+                    effective_instructions = new_registration_agent_main_instructions.format(
+                        **{"Team Name": "the relevant team", "Age Group": "the relevant age group", "Registration Season": "the current season"}
+                    )
+                except KeyError:
+                     # This means new_registration_agent_main_instructions from registration.py does NOT have these placeholders anymore,
+                     # which is the ideal state if it's written to be neutral for subsequent turns by default.
+                     effective_instructions = new_registration_agent_main_instructions
+                
+                agent_to_run_dynamically_configured = Agent(
+                    name=base_agent_from_registry.name,
+                    instructions=append_formatting_guidelines(effective_instructions), # Use the potentially formatted or direct instructions
+                    output_type=base_agent_from_registry.output_type,
+                    tools=deepcopy(base_agent_from_registry.tools) if base_agent_from_registry.tools else [],
+                    handoffs=deepcopy(base_agent_from_registry.handoffs) if base_agent_from_registry.handoffs else [],
+                )
+            # Else, for other agents or if new_registration_agent is called without specific conditions met for dynamic config,
+            # agent_to_run_dynamically_configured remains base_agent_from_registry, which is fine.
+
+            messages_for_agent_run: List[Dict[str, Any]] = [msg.model_dump() for msg in turn_conversation_history]
+            
+            response_accumulator = {"final_json_response": ""} 
+            try:
+                print(f"[ENDPOINT] Running agent '{agent_to_run_dynamically_configured.name}' for this turn.")
+                async for agent_event_json_str in run_agent_stream(
+                    agent_to_run_dynamically_configured,
+                    messages_for_agent_run,
+                    response_accumulator
+                ):
+                    yield agent_event_json_str
+                print(f"[ENDPOINT] Agent '{agent_to_run_dynamically_configured.name}' completed. Full JSON: {response_accumulator['final_json_response']}")
+            except Exception as e_run_agent:
+                print(f"[ENDPOINT] Uncaught exception from run_agent_stream for {agent_to_run_dynamically_configured.name}: {e_run_agent}")
+                err_id = f"err_ras_uncaught_{uuid.uuid4()}"
+                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": err_id, "agent_name": "System Error"}})
+                yield json.dumps({"event_type": "AgentErrorEvent", "data": {"error": f"Core error running agent {agent_to_run_dynamically_configured.name}.", "agent_name": agent_to_run_dynamically_configured.name, "id": err_id }})
+                yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": err_id}})
+        
+        elif run_an_agent_this_turn and not active_agent_name: # Should be caught by agent not found if name was None
+            print(f"[ENDPOINT] CRITICAL LOGIC FLAW: Attempted to run agent but active_agent_name is None.")
+            error_id = f"err_no_agent_{uuid.uuid4()}"
+            yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_id, "agent_name": "System Error"}})
+            yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, a system error occurred: No agent was selected."}})
+            yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_id}})
+            return
+        # If not run_an_agent_this_turn, means response was already handled (e.g., invalid first code)
+
+        print("[ENDPOINT] Event generation for this turn complete.")
 
     return EventSourceResponse(event_generator())
 
