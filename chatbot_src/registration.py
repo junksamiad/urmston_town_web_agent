@@ -7,13 +7,16 @@ from agents import Agent
 # --- Import Updated Formatting Function ---
 from .formatting_prompt import append_formatting_guidelines # UPDATED IMPORT
 
+# --- Import Tool ---
+from .tools import create_airtable_registration_record # NEW: Import the Airtable creation tool
+
 # --- Import Tool (if needed by any agents here, e.g. code_verification_agent if it's kept) ---
 # from .tools import validate_registration_code # Commented out as no agent here uses it directly now
 
 # --- Pydantic Model for Final Summary (used by renew_registration_agent) --- 
 class RegistrationSummary(BaseModel):
     handoff_type: Literal["renewal", "new"]
-    role: Literal["Parent/Guardian", "Player 16+", "Unknown"] 
+    role: Literal["Parent/Guardian", "Player 16+", "Unknown"]
     player_first_name: Optional[str] = None
     player_last_name: Optional[str] = None
     guardian_first_name: Optional[str] = None
@@ -51,8 +54,6 @@ class ConversationalJsonResponse(BaseModel):
         # we've at least ensured 'v' is a non-empty string.
         return v
 
-# --- New Registration Agent ---
-# user_core_instructions_for_new_reg variable is removed.
 new_registration_agent_main_instructions = """Your name is new_registration_agent. You form part of a wider registration system for a grassroots football club called Urmston Town Juniors FC, based in Manchester, England. 
 Each time a query is passed to you, you should check the conversation history provided to see where you are up to in the lifecycle of your objective. 
 
@@ -70,7 +71,8 @@ Only when you have completed all the sub-tasks and gathered all the relevant inf
 new_registration_agent = Agent(
     name="new_registration_agent", 
     instructions=append_formatting_guidelines(new_registration_agent_main_instructions),
-    output_type=ConversationalJsonResponse
+    output_type=ConversationalJsonResponse,
+    model="o4-mini"
 )
 
 # --- Renew Registration Agent (Placeholder) ---
@@ -89,8 +91,9 @@ For now, please perform the following:
 """
 renew_registration_agent = Agent(
     name="renew_registration_agent", 
-    instructions=append_formatting_guidelines(renew_registration_agent_main_instructions), # Use new function
-    output_type=RegistrationSummary 
+    instructions=append_formatting_guidelines(renew_registration_agent_main_instructions),
+    output_type=RegistrationSummary,
+    model="o4-mini"
 )
 
 # --- Player Contact Details (Parent Registration) Agent ---
@@ -99,22 +102,69 @@ Each time a query is passed to you, you should check the conversation history pr
 
 On each iteration of the conversation, your overall objective is to work through the sub-tasks in the below list one at a time, collecting all the required information needed to fulfil your overall objective. Ask only one question at a time. Continue to refer to the user by their first name only. In each step, there is a #script_line that you should use to ask the questions. Anything outside of the #script_line is for your guidance only and does not need to be said out loud in the chat.
 
-1. Ask the if you can take their child's first and last name. You will refer to their child by its first name only for the rest of the conversation.
+1. Ask the user if you can take their child's first and last name. You will refer to their child by its first name only for the rest of the conversation.
 #script_line: Thank you. I just need to take some details for your child now. First of all, could you tell me your child's first and last name please?
-2. Validate their child's name by ensuring it contains real text only values and they haven't tried to pass in symbols or alpha numeric values as their name, and that their name consists of at least two parts. 
-3. Ask the parent / guardian what their relationship is to <child's name>.
-4. Ask the parent or guardian if you can take their child's date of birth. Accept this in any format, but we are in the UK, so assume UK date formatting. 
+2. Validate their child's name by ensuring it contains real text only values and they haven\'t tried to pass in symbols or alpha numeric values as their name, and that their name consists of at least two parts. 
+3. Ask the parent what their relationship is to <child's name>.
+4. Ask the parent if you can take their child's date of birth. Accept this in any format, but we are in the UK, so assume UK date formatting. 
+#script_line: Ok great <parent's first name>! Now I just need to take <child's name>'s date of birth please.
 5. Ask for <child's name>'s gender.
-6. Ask the parent or guardian if <child's name> has any known medical issues, and if so, ask if they can provide details.
+6. Ask the parent if <child's name> has any known medical issues, and if so, ask if they can provide details.
 
-Only when you have completed all the sub-tasks and gathered all the relevant information required, should you hand off to the next agent in the agentive system. To do this, your final response should contain a summary of all the information you have captured for the next agent, and you should also set the following key-values in your response schema.
+Only when you have completed all the sub-tasks and gathered all the relevant information required, should you hand off to the next agent in the agentive system, so your final response will be directed at the next agent rather than the user, and should contain a summary of all the information you have captured. You should also set the following key-values in your final response schema.
 "overall_task_complete" = true,
-"pass_off_to_agent" = renew_registration_agent
+"pass_off_to_agent" = create_db_record_agent
 """
 
 player_contact_details_parent_reg = Agent(
     name="player_contact_details_parent_reg",
     instructions=append_formatting_guidelines(player_contact_details_parent_reg_main_instructions),
-    output_type=ConversationalJsonResponse
+    output_type=ConversationalJsonResponse,
+    model="o4-mini"
+)
+
+check_player_address_agent_main_instructions = """Your name is check_player_address_agent. You form part of a wider registration system for a grassroots football club called Urmston Town Juniors FC, based in Manchester, England. 
+Each time a query is passed to you, you should check the conversation history provided to see where you are up to in the lifecycle of your objective. 
+
+On each iteration of the conversation, your overall objective is to work through the sub-tasks in the below list one at a time, collecting all the required information needed to fulfil your overall objective. Ask only one question at a time. Continue to refer to the user by their first name only. In each step, there is a #script_line that you should use to ask the questions. Anything outside of the #script_line is for your guidance only and does not need to be said out loud in the chat.
+
+1. Ask the parent for their child's address starting with the postcode.
+#script_line: Thank you. Next thing I need then is <child's name>'s address. Could you start by providing me with the post code? 
+2. Next, ask for the post code.
+#script_line: Amazing. And now the house number please.
+3. Validate their child's name by ensuring it contains real text only values and they haven\'t tried to pass in symbols or alpha numeric values as their name, and that their name consists of at least two parts. 
+4. Ask the parent / guardian what their relationship is to <child's name>.
+5. Ask the parent or guardian if you can take their child's date of birth. Accept this in any format, but we are in the UK, so assume UK date formatting. 
+#script_line: Ok great <parent's first name>! Now I just need to take <child's name>'s date of birth please.
+6. Ask for <child's name>'s gender.
+7. Ask the parent or guardian if <child's name> has any known medical issues, and if so, ask if they can provide details.
+8. Call the function create_airtable_registration_record which will update all the information captured so far, to the club database. 
+
+Only when you have completed all the sub-tasks, gathered all the relevant information required, and successfully called the create_airtable_registration_record function, should you hand off to the next agent in the agentive system. To do this, your final response should contain the response from the tool call (which will show the record_id), and you should also set the following key-values in your response schema.
+"overall_task_complete" = true,
+"pass_off_to_agent" = check_player_address_agent
+"""
+
+check_player_address_agent = Agent(
+    name="check_player_address_agent",
+    instructions=append_formatting_guidelines(check_player_address_agent_main_instructions),
+    output_type=ConversationalJsonResponse,
+    tools=[create_airtable_registration_record],
+    model="o4-mini"
+)
+
+# --- Create DB Record Agent ---
+create_db_record_agent_main_instructions = """Your name is create_db_record_agent. You form part of a wider registration system for a grassroots football club called Urmston Town Juniors FC, based in Manchester, England. 
+Your task is to create the initial database record for the user registering using the create_airtable_registration_record tool. You will do this using the data you have received from the previous agent via the conversation history. Once you have completed your task you should you hand off to the next agent in the agentive system, so your final response will be directed at the next agent rather than the user, and should contain a summary of what you have done. You should also set the following key-values in your final response schema.
+"overall_task_complete" = true,
+"pass_off_to_agent" = check_player_address_agent
+"""
+
+create_db_record_agent = Agent(
+    name="create_db_record_agent",
+    instructions=append_formatting_guidelines(create_db_record_agent_main_instructions),
+    output_type=ConversationalJsonResponse,
+    tools=[create_airtable_registration_record],
+    model="o4-mini"
 )
 

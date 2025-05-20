@@ -74,7 +74,9 @@ from chatbot_src.registration import (
     new_registration_agent,
     RegistrationSummary,
     new_registration_agent_main_instructions,
-    player_contact_details_parent_reg # ADD THIS IMPORT
+    player_contact_details_parent_reg,
+    check_player_address_agent,
+    create_db_record_agent # ADD THIS IMPORT
 )
 # Import tools if needed directly (though agents should encapsulate them)
 # from chatbot_src.tools import validate_registration_code
@@ -152,7 +154,9 @@ AGENT_REGISTRY: Dict[str, Agent] = {
     payments_agent.name: payments_agent,
     new_registration_agent.name: new_registration_agent, 
     renew_registration_agent.name: renew_registration_agent,
-    player_contact_details_parent_reg.name: player_contact_details_parent_reg # ADD THIS AGENT
+    player_contact_details_parent_reg.name: player_contact_details_parent_reg,
+    check_player_address_agent.name: check_player_address_agent,
+    create_db_record_agent.name: create_db_record_agent # ADD THIS AGENT
 }
 
 print("Agents imported and defined.")
@@ -387,7 +391,7 @@ async def initial_connection_stream():
         # Optionally send a keep-alive message
         # yield json.dumps({"event_type": "keepalive"})
 
-@app.post("/chat/stream")
+@app.post("/chat/stream") 
 async def chat_stream_endpoint(chat_request: ChatRequest):
     """
     Handles chat requests. Can involve a chain of agents if a handoff is indicated
@@ -442,7 +446,7 @@ async def chat_stream_endpoint(chat_request: ChatRequest):
         elif chat_request.last_agent_name:
             initial_agent_name_for_turn = chat_request.last_agent_name
             print(f"[ENDPOINT] Continuing with last agent specified by client: {initial_agent_name_for_turn}")
-        else:
+        else: # CORRECTED INDENTATION: This 'else' corresponds to the 'if/elif' for determining initial_agent_name_for_turn
             # (Error handling for unexpected state - yield error to client and return)
             print(f"[ENDPOINT] UNEXPECTED STATE: History not empty, but no last_agent_name provided. User message: '{current_input_content_for_agent}'")
             error_message_id = f"err_unexpected_state_{uuid.uuid4()}"
@@ -452,7 +456,8 @@ async def chat_stream_endpoint(chat_request: ChatRequest):
             return
 
         # --- Agent Execution Loop ---
-        active_agent_name_in_chain = initial_agent_name_for_turn
+        # This block should be at the same indentation level as the if/elif/else block above.
+        active_agent_name_in_chain = initial_agent_name_for_turn 
         # This history accumulates messages from the original request PLUS any silent handoffs
         loop_conversation_history = list(current_turn_conversation_history) # Make a mutable copy for the loop
         
