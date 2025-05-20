@@ -387,93 +387,120 @@ async def initial_connection_stream():
         # Optionally send a keep-alive message
         # yield json.dumps({"event_type": "keepalive"})
 
-@app.post("/chat/stream") 
+@app.post("/chat/stream")
 async def chat_stream_endpoint(chat_request: ChatRequest):
     """
-    Handles chat requests in a turn-based manner.
-    One agent runs per request. The client uses flags from the agent's response
-    to determine the 'last_agent_name' for the next request.
+    Handles chat requests. Can involve a chain of agents if a handoff is indicated
+    by an agent completing its task.
     """
 
     print(f"[ENDPOINT] Received: User='{chat_request.user_message}', LastAgent='{chat_request.last_agent_name}', HistoryEmpty={not chat_request.history}")
 
     async def event_generator():
-        turn_conversation_history: List[ChatMessageInput] = list(chat_request.history) if chat_request.history else []
+        current_turn_conversation_history: List[ChatMessageInput] = list(chat_request.history) if chat_request.history else []
         
-        current_user_message_content = chat_request.user_message
-        
-        # Append current user message to this turn's history if it's not a duplicate of the last user message
-        # This handles cases where a user might resubmit, but assumes history from client is the source of truth.
-        if not turn_conversation_history or \
-           not (turn_conversation_history[-1].role == "user" and turn_conversation_history[-1].content == current_user_message_content):
-            turn_conversation_history.append(ChatMessageInput(role="user", content=current_user_message_content))
+        # Initial user message for the very first agent in a potential chain
+        # For subsequent agents in a silent handoff chain, this will be overridden.
+        current_input_content_for_agent = chat_request.user_message
 
-        active_agent_name: Optional[str] = None
-        agent_initial_context: Optional[Dict[str, Any]] = None
-        run_an_agent_this_turn = False
+        # Determine the first agent to run
+        initial_agent_name_for_turn: Optional[str] = None
+        initial_agent_context_for_turn: Optional[Dict[str, Any]] = None
 
-        if not chat_request.history: # STRICT: First message from the user
+        if not current_turn_conversation_history: # STRICT: First message from the user for the whole session
             print("[ENDPOINT] First message in session. Expecting registration code.")
-            validation_response = parse_and_validate_registration_code(current_user_message_content)
+            validation_response = parse_and_validate_registration_code(current_input_content_for_agent)
 
             if validation_response.status == "valid" and validation_response.details:
-                print(f"[ENDPOINT] Registration code '{current_user_message_content}' is VALID for first turn.")
+                print(f"[ENDPOINT] Registration code '{current_input_content_for_agent}' is VALID for first turn.")
                 details = validation_response.details
                 if details.code_type == "new_registration":
-                    active_agent_name = new_registration_agent.name
+                    initial_agent_name_for_turn = new_registration_agent.name
                 elif details.code_type == "renewal_registration":
-                    active_agent_name = renew_registration_agent.name
+                    initial_agent_name_for_turn = renew_registration_agent.name
                 
-                if active_agent_name:
-                    agent_initial_context = {"parsed_code_details": details.model_dump()}
-                    run_an_agent_this_turn = True
-                else: 
+                if initial_agent_name_for_turn:
+                    initial_agent_context_for_turn = {"parsed_code_details": details.model_dump()}
+                else:
                     err_msg = f"Valid code type '{details.code_type}' on first turn has no mapped agent."
+                    # (Error handling for no mapped agent - yield error to client and return)
                     print(f"[ENDPOINT] ERROR: {err_msg}")
                     error_message_id = f"val_err_{uuid.uuid4()}"
                     yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Message"}})
                     yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, an internal error occurred with the code. Please try again."}})
                     yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
                     return
-            else: 
-                print(f"[ENDPOINT] Input '{current_user_message_content}' on first turn is not a valid registration code. Reason: {validation_response.reason if validation_response.reason else 'Not a valid code format.'}")
+            else:
+                # (Error handling for invalid code - yield error to client and return)
+                print(f"[ENDPOINT] Input '{current_input_content_for_agent}' on first turn is not a valid registration code. Reason: {validation_response.reason if validation_response.reason else 'Not a valid code format.'}")
                 error_message_id = f"val_invalid_{uuid.uuid4()}"
-                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Message"}}) # Changed agent name for clarity
+                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Message"}})
                 yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, you don't seem to have entered a valid code, please try again."}})
                 yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
-                return 
+                return
 
-        elif chat_request.last_agent_name: 
-            active_agent_name = chat_request.last_agent_name
-            print(f"[ENDPOINT] Continuing with last agent specified by client: {active_agent_name}")
-            run_an_agent_this_turn = True
+        elif chat_request.last_agent_name:
+            initial_agent_name_for_turn = chat_request.last_agent_name
+            print(f"[ENDPOINT] Continuing with last agent specified by client: {initial_agent_name_for_turn}")
         else:
-            print(f"[ENDPOINT] UNEXPECTED STATE: History not empty, but no last_agent_name provided. User message: '{current_user_message_content}'")
+            # (Error handling for unexpected state - yield error to client and return)
+            print(f"[ENDPOINT] UNEXPECTED STATE: History not empty, but no last_agent_name provided. User message: '{current_input_content_for_agent}'")
             error_message_id = f"err_unexpected_state_{uuid.uuid4()}"
             yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_message_id, "agent_name": "System Error"}})
             yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, an unexpected error occurred. Please try starting a new conversation."}})
             yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_message_id}})
             return
 
-        if run_an_agent_this_turn and active_agent_name:
-            base_agent_from_registry = AGENT_REGISTRY.get(active_agent_name)
+        # --- Agent Execution Loop ---
+        active_agent_name_in_chain = initial_agent_name_for_turn
+        # This history accumulates messages from the original request PLUS any silent handoffs
+        loop_conversation_history = list(current_turn_conversation_history) # Make a mutable copy for the loop
+        
+        # The current_input_content_for_agent holds the message that triggers the *first* agent in this chain.
+        # This could be the raw user input (e.g. registration code) or a system-generated handoff message.
+        # It needs to be added to the history for that first agent.
+        # For subsequent agents in a silent handoff chain, their "user" input is added later in the loop.
+
+        if active_agent_name_in_chain: # Only add if we are actually going to run an agent
+            is_first_message_in_loop_history_user_and_matches_current_input = False
+            if loop_conversation_history:
+                last_msg = loop_conversation_history[-1]
+                if last_msg.role == "user" and last_msg.content == current_input_content_for_agent:
+                    is_first_message_in_loop_history_user_and_matches_current_input = True
             
+            if not is_first_message_in_loop_history_user_and_matches_current_input:
+                # If history is empty, or last message isn't the same user input, add it.
+                # This ensures the first agent in the chain gets the triggering input.
+                loop_conversation_history.append(ChatMessageInput(role="user", content=current_input_content_for_agent))
+                print(f"[LOOP PREP] Added triggering input for first agent ({active_agent_name_in_chain}): '{current_input_content_for_agent}'")
+
+
+        # This context is specific to the new_registration_agent for its first run with a code.
+        # It should only be used once by that agent.
+        current_agent_initial_context = initial_agent_context_for_turn
+
+        while active_agent_name_in_chain:
+            print(f"[LOOP] Attempting to run agent: {active_agent_name_in_chain}")
+            base_agent_from_registry = AGENT_REGISTRY.get(active_agent_name_in_chain)
+
             if not base_agent_from_registry:
-                err_msg = f"Agent '{active_agent_name}' not found in registry."
-                print(f"[ENDPOINT] ERROR: {err_msg}")
-                error_id = f"err_agent_lookup_{uuid.uuid4()}"
-                # Ensure this error also follows the START_ASSISTANT_MESSAGE -> content -> COMPLETE_ASSISTANT_MESSAGE pattern
+                err_msg = f"Agent '{active_agent_name_in_chain}' for handoff not found in registry."
+                print(f"[LOOP] ERROR: {err_msg}")
+                error_id = f"err_agent_lookup_loop_{uuid.uuid4()}"
+                # This error breaks the chain and is sent to the client.
                 yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_id, "agent_name": "System Error"}})
-                # Using RawResponsesStreamEvent for the error content
                 yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": f"Error: {err_msg}"}})
                 yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_id}})
-                return
+                active_agent_name_in_chain = None # Break loop
+                continue
 
             agent_to_run_dynamically_configured: Agent = base_agent_from_registry
-
-            if agent_initial_context and base_agent_from_registry.name == new_registration_agent.name:
-                details = agent_initial_context.get("parsed_code_details")
-                if details: 
+            
+            # --- Dynamic Configuration for new_registration_agent (first turn with code) ---
+            if current_agent_initial_context and base_agent_from_registry.name == new_registration_agent.name:
+                details = current_agent_initial_context.get("parsed_code_details")
+                if details:
+                    # (Formatting logic for new_registration_agent instructions)
                     team_name_for_prompt = details.get("team_name", "Unknown Team")
                     age_group_val = details.get("age_group")
                     age_group_for_prompt = f"u{age_group_val}" if age_group_val is not None else "Unknown Age Group"
@@ -481,80 +508,128 @@ async def chat_stream_endpoint(chat_request: ChatRequest):
                     end_yy = details.get('season_end_year', 0) % 100
                     registration_season_for_prompt = f"{start_yy:02d}/{end_yy:02d}"
                     
-                    # UPDATED LOGIC: Directly format the main instructions template
                     final_instructions_for_agent = new_registration_agent_main_instructions.format(
                         **{"Team Name": team_name_for_prompt, "Age Group": age_group_for_prompt, "Registration Season": registration_season_for_prompt}
                     )
-                    print(f"[ENDPOINT] Initial turn for {new_registration_agent.name}. Dynamically formatted instructions.")
+                    print(f"[LOOP] Initial turn for {new_registration_agent.name}. Dynamically formatted instructions.")
                     agent_to_run_dynamically_configured = Agent(
                         name=new_registration_agent.name,
                         instructions=append_formatting_guidelines(final_instructions_for_agent),
+                        output_type=new_registration_agent.output_type, # Ensure this is correct, e.g., ConversationalJsonResponse
+                        tools=deepcopy(new_registration_agent.tools) if new_registration_agent.tools else [],
+                        handoffs=deepcopy(new_registration_agent.handoffs) if new_registration_agent.handoffs else [],
+                    )
+                    current_agent_initial_context = None # Consume this context; it's only for the first run
+                else: # Should not happen if initial_agent_context_for_turn was set correctly
+                    print(f"[LOOP] WARN: {new_registration_agent.name} was expected to have initial context but details were missing.")
+            elif base_agent_from_registry.name == new_registration_agent.name and not current_agent_initial_context:
+                print(f"[LOOP] Subsequent turn for {new_registration_agent.name} or it's being run without initial code context.")
+                # Ensure instructions are neutral if placeholders were expected.
+                # The current new_registration_agent_main_instructions is designed to work even if those are not filled,
+                # as the agent is told to check history.
+                # We might need to re-apply append_formatting_guidelines if not done by default or if agent obj is reused.
+                # For safety, let's re-create it simply if it's this agent to ensure formatting guidelines.
+                agent_to_run_dynamically_configured = Agent(
+                        name=new_registration_agent.name,
+                        instructions=append_formatting_guidelines(new_registration_agent_main_instructions.format(
+                            **{"Team Name": "the team", "Age Group": "your age group", "Registration Season": "the current season"} # Generic fillers
+                        )), # Or ensure original agent def has this.
                         output_type=new_registration_agent.output_type,
                         tools=deepcopy(new_registration_agent.tools) if new_registration_agent.tools else [],
                         handoffs=deepcopy(new_registration_agent.handoffs) if new_registration_agent.handoffs else [],
                     )
-            elif base_agent_from_registry.name == new_registration_agent.name and not agent_initial_context:
-                print(f"[ENDPOINT] Subsequent turn for {new_registration_agent.name}. Using its defined instructions (which should be neutral).")
-                # For subsequent turns, the placeholders for team, age, season in the prompt might not be relevant 
-                # or could be filled with generic values if the .format() call still expects them.
-                # The current new_registration_agent_main_instructions is designed to work even if those are not filled,
-                # as it instructs the agent to check history.
-                # If new_registration_agent_main_instructions strictly requires all keys for .format(),
-                # we need to provide them, e.g., with neutral/default values.
-                # Assuming for now that the agent's own text can handle this.
-                # If new_registration_agent_main_instructions *still* has .format and expects values, provide defaults:
-                try:
-                    effective_instructions = new_registration_agent_main_instructions.format(
-                        **{"Team Name": "the relevant team", "Age Group": "the relevant age group", "Registration Season": "the current season"}
+            else: # For other agents or if new_registration_agent is run in a state not needing specific formatting
+                print(f"[LOOP] Agent {base_agent_from_registry.name} will run with its standard defined instructions.")
+                # Ensure formatting guidelines are applied if not inherently part of agent definition
+                # This assumes other agents like player_contact_details_parent_reg also have instructions ready
+                # and their Agent objects are correctly defined with formatting appended.
+                # For safety, let's ensure it, especially for agents using ConversationalJsonResponse
+                if hasattr(base_agent_from_registry, 'output_type') and base_agent_from_registry.output_type.__name__ == 'ConversationalJsonResponse':
+                     agent_to_run_dynamically_configured = Agent(
+                        name=base_agent_from_registry.name,
+                        instructions=append_formatting_guidelines(base_agent_from_registry.instructions),
+                        output_type=base_agent_from_registry.output_type,
+                        tools=deepcopy(base_agent_from_registry.tools) if base_agent_from_registry.tools else [],
+                        handoffs=deepcopy(base_agent_from_registry.handoffs) if base_agent_from_registry.handoffs else [],
                     )
-                except KeyError:
-                     # This means new_registration_agent_main_instructions from registration.py does NOT have these placeholders anymore,
-                     # which is the ideal state if it's written to be neutral for subsequent turns by default.
-                     effective_instructions = new_registration_agent_main_instructions
-                
-                agent_to_run_dynamically_configured = Agent(
-                    name=base_agent_from_registry.name,
-                    instructions=append_formatting_guidelines(effective_instructions), # Use the potentially formatted or direct instructions
-                    output_type=base_agent_from_registry.output_type,
-                    tools=deepcopy(base_agent_from_registry.tools) if base_agent_from_registry.tools else [],
-                    handoffs=deepcopy(base_agent_from_registry.handoffs) if base_agent_from_registry.handoffs else [],
-                )
-            # Else, for other agents or if new_registration_agent is called without specific conditions met for dynamic config,
-            # agent_to_run_dynamically_configured remains base_agent_from_registry, which is fine.
 
-            messages_for_agent_run: List[Dict[str, Any]] = [msg.model_dump() for msg in turn_conversation_history]
+
+            messages_for_agent_run: List[Dict[str, Any]] = [msg.model_dump() for msg in loop_conversation_history]
+            print(f"[LOOP] History for agent run ({agent_to_run_dynamically_configured.name}): {json.dumps(messages_for_agent_run, indent=2)}")
+
+            response_accumulator = {"final_json_response": ""}
+            assistant_message_id_for_stream = f"asst_{uuid.uuid4()}" # Unique ID for this agent's interaction in the loop
             
-            # --- ADD THIS LOGGING STATEMENT ---
-            print(f"[ENDPOINT] History for agent run ({agent_to_run_dynamically_configured.name}): {json.dumps(messages_for_agent_run, indent=2)}")
-            # --- END LOGGING STATEMENT ---
+            stream_to_client_this_agent = True # Assume we stream unless silent handoff happens
 
-            response_accumulator = {"final_json_response": ""} 
+            # Buffer events for the current agent. We only send them if it's not a silent handoff.
+            buffered_events_for_client = []
+
+            async for event_json_str in run_agent_stream(agent_to_run_dynamically_configured, messages_for_agent_run, response_accumulator):
+                # Always buffer START and COMPLETE messages.
+                # For other messages, buffer them to be sent if not a silent handoff.
+                buffered_events_for_client.append(event_json_str)
+
+            # --- Post-agent run processing ---
+            final_json_response_str = response_accumulator.get("final_json_response", "{}")
+            print(f"[LOOP] Agent {active_agent_name_in_chain} finished. Accumulated JSON: {final_json_response_str}")
+
             try:
-                print(f"[ENDPOINT] Running agent '{agent_to_run_dynamically_configured.name}' for this turn.")
-                async for agent_event_json_str in run_agent_stream(
-                    agent_to_run_dynamically_configured,
-                    messages_for_agent_run,
-                    response_accumulator
-                ):
-                    yield agent_event_json_str
-                print(f"[ENDPOINT] Agent '{agent_to_run_dynamically_configured.name}' completed. Full JSON: {response_accumulator['final_json_response']}")
-            except Exception as e_run_agent:
-                print(f"[ENDPOINT] Uncaught exception from run_agent_stream for {agent_to_run_dynamically_configured.name}: {e_run_agent}")
-                err_id = f"err_ras_uncaught_{uuid.uuid4()}"
-                yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": err_id, "agent_name": "System Error"}})
-                yield json.dumps({"event_type": "AgentErrorEvent", "data": {"error": f"Core error running agent {agent_to_run_dynamically_configured.name}.", "agent_name": agent_to_run_dynamically_configured.name, "id": err_id }})
-                yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": err_id}})
-        
-        elif run_an_agent_this_turn and not active_agent_name: # Should be caught by agent not found if name was None
-            print(f"[ENDPOINT] CRITICAL LOGIC FLAW: Attempted to run agent but active_agent_name is None.")
-            error_id = f"err_no_agent_{uuid.uuid4()}"
-            yield json.dumps({"event_type": "START_ASSISTANT_MESSAGE", "data": {"id": error_id, "agent_name": "System Error"}})
-            yield json.dumps({"event_type": "RawResponsesStreamEvent", "data": {"delta": "Sorry, a system error occurred: No agent was selected."}})
-            yield json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": error_id}})
-            return
-        # If not run_an_agent_this_turn, means response was already handled (e.g., invalid first code)
+                # This is where we expect ConversationalJsonResponse for agents that use it.
+                parsed_agent_response = json.loads(final_json_response_str)
+                
+                agent_response_text = parsed_agent_response.get("agent_response_text", "No text response.")
+                overall_task_complete = parsed_agent_response.get("overall_task_complete", False)
+                pass_off_to_agent_name = parsed_agent_response.get("pass_off_to_agent")
 
-        print("[ENDPOINT] Event generation for this turn complete.")
+                print(f"[LOOP] Parsed response: task_complete={overall_task_complete}, pass_off_to={pass_off_to_agent_name}")
+
+                # Add this agent's full JSON response to the loop's conversation history
+                # The role is 'assistant' and content is the raw JSON string it produced.
+                loop_conversation_history.append(ChatMessageInput(role="assistant", content=final_json_response_str))
+
+                if overall_task_complete and pass_off_to_agent_name and pass_off_to_agent_name != active_agent_name_in_chain : # Ensure it's a different agent
+                    print(f"[LOOP] Silent handoff: From {active_agent_name_in_chain} to {pass_off_to_agent_name}.")
+                    stream_to_client_this_agent = False # Do not send buffered events for the handing-off agent
+
+                    # Prepare for next agent in chain
+                    active_agent_name_in_chain = pass_off_to_agent_name
+                    
+                    # The "user" message for the next agent is derived from the previous agent's response text.
+                    # This makes the handoff content explicit in the history for the next agent.
+                    handoff_input_content = f"System Handoff: The previous agent ({agent_to_run_dynamically_configured.name}) has completed its task. Its summary and findings are: {agent_response_text}"
+                    loop_conversation_history.append(ChatMessageInput(role="user", content=handoff_input_content))
+                    
+                    current_agent_initial_context = None # Clear any prior initial context, it's consumed.
+                    # Loop continues with the new active_agent_name_in_chain
+                else:
+                    print(f"[LOOP] No silent handoff. Agent {active_agent_name_in_chain} response will be sent to client. Task_complete: {overall_task_complete}, Pass_off_to: {pass_off_to_agent_name}")
+                    active_agent_name_in_chain = None # Break loop, wait for next user interaction
+            
+            except json.JSONDecodeError as e:
+                print(f"[LOOP] ERROR: Failed to parse final JSON response from agent {active_agent_name_in_chain}: {e}")
+                print(f"[LOOP] Raw response was: {final_json_response_str}")
+                # Send an error to the client for this agent
+                error_event_data = {
+                    "event_type": "AgentErrorEvent",
+                    "data": {"error": f"Failed to parse final response: {e}", "agent_name": agent_to_run_dynamically_configured.name, "id": assistant_message_id_for_stream }
+                }
+                buffered_events_for_client.append(json.dumps(error_event_data))
+                # Ensure a COMPLETE event for this broken agent stream if START was sent or buffered
+                found_start = any("\"event_type\": \"START_ASSISTANT_MESSAGE\"" in evt for evt in buffered_events_for_client if isinstance(evt, str))
+                if found_start:
+                     buffered_events_for_client.append(json.dumps({"event_type": "COMPLETE_ASSISTANT_MESSAGE", "data": {"id": assistant_message_id_for_stream}}))
+                
+                active_agent_name_in_chain = None # Break loop due to error
+
+            if stream_to_client_this_agent:
+                print(f"[LOOP] Streaming {len(buffered_events_for_client)} events to client for agent {agent_to_run_dynamically_configured.name}.")
+                for event_json_str in buffered_events_for_client:
+                    yield event_json_str
+            else:
+                print(f"[LOOP] Suppressed streaming of {len(buffered_events_for_client)} events to client due to silent handoff from agent {agent_to_run_dynamically_configured.name}.")
+
+            # If loop is broken (active_agent_name_in_chain is None), the event_generator finishes.
 
     return EventSourceResponse(event_generator())
 
