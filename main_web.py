@@ -73,7 +73,8 @@ from chatbot_src.registration import (
     renew_registration_agent,
     new_registration_agent,
     RegistrationSummary,
-    new_registration_agent_main_instructions
+    new_registration_agent_main_instructions,
+    player_contact_details_parent_reg # ADD THIS IMPORT
 )
 # Import tools if needed directly (though agents should encapsulate them)
 # from chatbot_src.tools import validate_registration_code
@@ -151,6 +152,7 @@ AGENT_REGISTRY: Dict[str, Agent] = {
     payments_agent.name: payments_agent,
     new_registration_agent.name: new_registration_agent, 
     renew_registration_agent.name: renew_registration_agent,
+    player_contact_details_parent_reg.name: player_contact_details_parent_reg # ADD THIS AGENT
 }
 
 print("Agents imported and defined.")
@@ -522,6 +524,10 @@ async def chat_stream_endpoint(chat_request: ChatRequest):
 
             messages_for_agent_run: List[Dict[str, Any]] = [msg.model_dump() for msg in turn_conversation_history]
             
+            # --- ADD THIS LOGGING STATEMENT ---
+            print(f"[ENDPOINT] History for agent run ({agent_to_run_dynamically_configured.name}): {json.dumps(messages_for_agent_run, indent=2)}")
+            # --- END LOGGING STATEMENT ---
+
             response_accumulator = {"final_json_response": ""} 
             try:
                 print(f"[ENDPOINT] Running agent '{agent_to_run_dynamically_configured.name}' for this turn.")
